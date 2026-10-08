@@ -146,7 +146,8 @@ def _status(ucs: dict[str, UseCase], entity: RemoteEntity) -> str:
 
 
 async def connect(ski: str, host: str | None, port: int, local_port: int, config: Path,
-                  raw: bool, read_all: bool = False, lpc_limit: float | None = None) -> int:
+                  raw: bool, read_all: bool = False, lpc_limit: float | None = None,
+                  lpc_duration: float = 300, write_failsafe: float | None = None) -> int:
     identity = Identity.load_or_create(config, "pyeebus")
     trust = TrustStore.load(config / "trust.json")
     service = EebusService(identity, brand="pyeebus", model="pyeebus-cli", serial=identity.ski[:8],
@@ -162,6 +163,10 @@ async def connect(ski: str, host: str | None, port: int, local_port: int, config
                 and entity.device.ski not in limit_written):
             limit_written.add(entity.device.ski)
             spawn(write_limit(entity))
+        if (write_failsafe is not None and name == LPC.DATA_UPDATE_FAILSAFE_POWER
+                and ("failsafe", entity.device.ski) not in limit_written):
+            limit_written.add(("failsafe", entity.device.ski))
+            spawn(write_failsafe_limit(entity))
         line = _status(ucs, entity)
         key = (entity.device.ski, entity.entity)
         if line and line != "charge state unknown" and last.get(key) != line:
@@ -172,7 +177,7 @@ async def connect(ski: str, host: str | None, port: int, local_port: int, config
     if read_all:
         cem.add_feature("Bill", Role.CLIENT)
     printed: set[tuple] = set()
-    limit_written: set[str] = set()
+    limit_written: set = set()
 
     def read_everything(device: RemoteDevice) -> None:
         for entity in device.entities[1:]:
@@ -186,10 +191,18 @@ async def connect(ski: str, host: str | None, port: int, local_port: int, config
 
     async def write_limit(entity: RemoteEntity) -> None:
         try:
-            await ucs["LPC"].write_consumption_limit(entity, LoadLimit(lpc_limit, True, duration=300))
-            print(f"  LPC limit {lpc_limit:g} W for 5 minutes accepted")
+            await ucs["LPC"].write_consumption_limit(
+                entity, LoadLimit(lpc_limit, True, duration=lpc_duration or None))
+            print(f"  LPC limit {lpc_limit:g} W accepted")
         except Exception as err:  # noqa: BLE001
             print(f"  LPC limit {lpc_limit:g} W failed: {err!r}")
+
+    async def write_failsafe_limit(entity: RemoteEntity) -> None:
+        try:
+            await ucs["LPC"].write_failsafe_consumption_limit(entity, write_failsafe)
+            print(f"  failsafe limit {write_failsafe:g} W accepted")
+        except Exception as err:  # noqa: BLE001
+            print(f"  failsafe limit {write_failsafe:g} W failed: {err!r}")
 
     def on_spine_event(event: Event) -> None:
         if event.type == EventType.DEVICE and event.change == Change.ADD and event.device:
@@ -303,7 +316,11 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--raw", action="store_true", help="print all SPINE messages")
     sp.add_argument("--read-all", action="store_true", help="read and print all data the device offers")
     sp.add_argument("--lpc-limit", type=float, metavar="W",
-                    help="test: set this power limit (LPC) for 5 minutes")
+                    help="test: set this power limit (LPC)")
+    sp.add_argument("--lpc-duration", type=float, default=300, metavar="S",
+                    help="duration of --lpc-limit in seconds, 0 = no end (default 300)")
+    sp.add_argument("--write-failsafe", type=float, metavar="W",
+                    help="test: write this failsafe power limit (LPC)")
     sp = sub.add_parser("simulate-evse", help="run a simulated wallbox (for development)")
     sp.add_argument("--port", type=int, default=4713)
     sp.add_argument("--trust", help="SKI of the energy manager to accept")
@@ -320,7 +337,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("SKI must be 40 hex characters")
         return asyncio.run(connect(normalize_ski(args.ski), args.host, args.port,
                                    args.local_port, args.config, args.raw, args.read_all,
-                                   args.lpc_limit))
+                                   args.lpc_limit, args.lpc_duration, args.write_failsafe))
     except KeyboardInterrupt:
         return 130
 
