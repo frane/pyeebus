@@ -16,6 +16,7 @@ from .device import (
 from .model import (
     Address,
     CmdClassifier,
+    DropMessage,
     ErrorNumber,
     Role,
     SpineError,
@@ -27,6 +28,7 @@ __all__ = [
     "Address",
     "Change",
     "CmdClassifier",
+    "DropMessage",
     "ErrorNumber",
     "Event",
     "EventType",

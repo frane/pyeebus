@@ -28,6 +28,7 @@ from .model import (
     SPECIFICATION_VERSION,
     Address,
     CmdClassifier,
+    DropMessage,
     ErrorNumber,
     Role,
     SpineError,
@@ -424,6 +425,7 @@ class RemoteDevice:
 
 
 WriteApproval = Callable[["Message"], SpineError | None]
+"""Return None to accept a write, a SpineError to reject it, or raise DropMessage."""
 
 
 class LocalFeature:
@@ -626,6 +628,7 @@ class LocalEntity:
         self.device = device
         self.entity = address
         self.type = entity_type
+        self.description: str | None = None
         self.features: list[LocalFeature] = []
         self._next_id = 0 if address == (0,) else 1
         self.heartbeat_timeout = heartbeat_timeout
@@ -655,7 +658,10 @@ class LocalEntity:
         return feature
 
     def information(self) -> dict[str, Any]:
-        return {"description": {"entityAddress": {"entity": list(self.entity)}, "entityType": self.type}}
+        desc: dict[str, Any] = {"entityAddress": {"entity": list(self.entity)}, "entityType": self.type}
+        if self.description:
+            desc["description"] = self.description
+        return {"description": desc}
 
     # use cases
     def add_use_case(self, actor: str, name: str, version: str, scenarios: list[int],
@@ -966,6 +972,8 @@ class LocalDevice:
                 self._handle_node_management(msg)
             else:
                 local_feature.handle(msg)
+        except DropMessage:
+            return
         except SpineError as err:
             if classifier != CmdClassifier.RESULT:
                 remote.sender.result(header, self.address, err)

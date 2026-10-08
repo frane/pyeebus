@@ -55,6 +55,13 @@ class SpineError(Exception):
         self.description = description
 
 
+class DropMessage(Exception):
+    """Raise from a handler (e.g. a write approval) to send no answer at all.
+
+    Not standard behaviour, but some devices do it; used to simulate them.
+    """
+
+
 # --- addresses ---------------------------------------------------------------------
 
 
