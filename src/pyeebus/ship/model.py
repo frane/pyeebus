@@ -25,6 +25,8 @@ PING_INTERVAL = 50.0  # SHIP 4.2
 
 INIT_MESSAGE = b"\x00\x00"
 
+CLOSE_REJECTED = 4452  # "Node rejected by application": remote has not paired us
+
 
 class MsgType(IntEnum):
     INIT = 0
@@ -57,7 +59,7 @@ class ShipError(Exception):
 
 
 class RemoteAbortError(ShipError):
-    """The remote node aborted the hello phase (it does not trust us)."""
+    """The remote node aborted the hello phase or rejected us (it does not trust us)."""
 
 
 def control(message: dict[str, Any]) -> bytes:

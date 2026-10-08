@@ -167,6 +167,8 @@ class ShipConnection:
         except TimeoutError as err:
             raise ShipError(f"timeout in state {self.state.value}") from err
         if isinstance(item, Exception):
+            if getattr(item, "code", None) == model.CLOSE_REJECTED:
+                raise RemoteAbortError("remote rejected this node (not paired yet)") from item
             raise ShipError(f"connection lost in state {self.state.value}: {item}") from item
         return item
 

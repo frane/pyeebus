@@ -9,7 +9,15 @@ import logging
 import sys
 from pathlib import Path
 
-from .ship import Identity, ShipNode, State, TrustStore, is_ski_valid, normalize_ski
+from .ship import (
+    Identity,
+    RemoteAbortError,
+    ShipNode,
+    State,
+    TrustStore,
+    is_ski_valid,
+    normalize_ski,
+)
 from .ship.mdns import ShipMdns, ShipService
 
 CONFIG_DIR = Path.home() / ".config" / "pyeebus"
@@ -43,15 +51,19 @@ async def connect(ski: str, host: str | None, port: int, local_port: int,
     trust = TrustStore.load(config / "trust.json")
     node = ShipNode(identity, ship_id=f"pyeebus-{identity.ski[:8]}", brand="pyeebus",
                     model="pyeebus-cli", device_type="EnergyManagementSystem",
-                    port=local_port, trust=trust)
+                    port=local_port, trust=trust, auto_connect=host is None)
     print(f"Our SKI: {identity.ski}")
     print("In the wallbox, pair with the EEBUS device 'pyeebus' / this SKI "
           "(Elli: Connections > HEMS connection > found EEBUS devices > Pair).\n")
 
     def on_state(remote: str, state: State, err: Exception | None) -> None:
-        extra = f": {err}" if err else ""
         if state == State.HELLO_WAITING_FOR_TRUST:
-            extra = " (the remote does not trust us yet, pair in the wallbox UI)"
+            return  # reported as rejection below
+        if isinstance(err, RemoteAbortError):
+            print(f"[{remote[:8]}] not paired yet: pair 'pyeebus' in the wallbox UI, "
+                  "retrying ...")
+            return
+        extra = f": {err}" if err else ""
         print(f"[{remote[:8]}] SHIP {state.value}{extra}")
 
     def on_connected(conn) -> None:
@@ -70,12 +82,15 @@ async def connect(ski: str, host: str | None, port: int, local_port: int,
     try:
         if host:
             while True:
+                delay = 5
                 try:
                     conn = await node.connect(host, port, ski)
                     await conn.wait_closed()
+                except RemoteAbortError:
+                    delay = 15
                 except Exception as err:  # noqa: BLE001
                     print(f"connection failed: {err}")
-                await asyncio.sleep(5)
+                await asyncio.sleep(delay)
         else:
             print("Waiting for the device via mDNS (Ctrl+C to stop) ...")
             await asyncio.Event().wait()

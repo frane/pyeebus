@@ -45,7 +45,11 @@ def service_from_info(info: AsyncServiceInfo) -> ShipService | None:
     txt = _txt(info.properties)
     if txt.get("txtvers") != "1" or not all(k in txt for k in ("id", "ski", "register")):
         return None  # SHIP 7.3.2: ignore invalid announcements
-    addresses = info.parsed_scoped_addresses(IPVersion.All)
+    # IPv4 first; link-local IPv6 without a scope id cannot be dialled.
+    addresses = sorted(
+        (a for a in info.parsed_scoped_addresses(IPVersion.All)
+         if not (a.lower().startswith("fe80:") and "%" not in a)),
+        key=lambda a: ":" in a)
     return ShipService(
         name=info.name,
         ski=normalize_ski(txt["ski"]),

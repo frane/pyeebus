@@ -6,8 +6,16 @@ import asyncio
 
 import pytest
 
-from pyeebus.ship import Identity, InvalidSkiError, ShipError, ShipNode, State, ski_from_certificate
-from pyeebus.ship import eebus_json, model
+from pyeebus.ship import (
+    Identity,
+    InvalidSkiError,
+    ShipError,
+    ShipNode,
+    State,
+    eebus_json,
+    model,
+    ski_from_certificate,
+)
 from pyeebus.ship.connection import ShipConnection
 from pyeebus.ship.model import Role
 
@@ -157,7 +165,10 @@ class FakeTransport:
         self.sent.append(message)
 
     async def receive(self) -> bytes:
-        return await self.incoming.get()
+        item = await self.incoming.get()
+        if isinstance(item, Exception):
+            raise item
+        return item
 
     async def close(self, code: int = 4001, reason: str = "") -> None:
         pass
@@ -195,3 +206,18 @@ async def test_remote_abort_raises():
     with pytest.raises(RemoteAbortError):
         await asyncio.wait_for(task, 2)
     assert conn.state == State.ERROR
+
+
+async def test_pending_then_close_4452_is_rejection():
+    """Elli behaviour for an unpaired node: hello pending, then close 4452."""
+    from pyeebus.ship import RemoteAbortError
+    from pyeebus.ship.transport import RemoteClosedError
+
+    tr = FakeTransport()
+    conn = ShipConnection(tr, Role.CLIENT, "local", "a" * 40)
+    task = asyncio.create_task(conn.run())
+    await tr.incoming.put(model.INIT_MESSAGE)
+    await tr.incoming.put(model.hello("pending", 60000))
+    await tr.incoming.put(RemoteClosedError(4452))
+    with pytest.raises(RemoteAbortError, match="not paired"):
+        await asyncio.wait_for(task, 2)

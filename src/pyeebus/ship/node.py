@@ -19,12 +19,13 @@ from . import transport
 from .cert import Identity, normalize_ski, ski_from_certificate
 from .connection import ShipConnection
 from .mdns import ShipMdns, ShipService
-from .model import DEFAULT_PORT, WEBSOCKET_PATH, Role, ShipError, State
+from .model import DEFAULT_PORT, WEBSOCKET_PATH, RemoteAbortError, Role, ShipError, State
 
 _LOGGER = logging.getLogger(__name__)
 
 RETRY_MIN = 2.0
 RETRY_MAX = 120.0
+RETRY_REJECTED = 15.0  # remote rejected us (not paired yet): don't hammer it
 
 
 def _der_to_pem(der: bytes) -> bytes:
@@ -213,6 +214,10 @@ class ShipNode:
                     await conn.wait_closed()
                     delay = RETRY_MIN  # connection ended; reconnect soon
                     break
+                except RemoteAbortError as err:
+                    _LOGGER.debug("%s rejected us: %s", service.ski[:8], err)
+                    delay = max(delay, RETRY_REJECTED)
+                    break  # the node answered; other addresses won't change that
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.debug("connect to %s at %s failed: %s", service.ski[:8], host, err)
             if self.mdns and service.ski in self.mdns.services:

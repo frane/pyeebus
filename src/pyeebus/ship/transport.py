@@ -68,6 +68,14 @@ def peer_certificate(ssl_object: ssl.SSLObject | ssl.SSLSocket | None) -> bytes:
     return der
 
 
+class RemoteClosedError(ConnectionError):
+    """The remote closed the websocket; ``code`` is its close code."""
+
+    def __init__(self, code: int | None) -> None:
+        super().__init__(f"websocket closed ({code})")
+        self.code = code
+
+
 class AiohttpTransport:
     """SHIP Transport over an aiohttp websocket (client or server side)."""
 
@@ -90,7 +98,7 @@ class AiohttpTransport:
                 return msg.data
             if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING,
                             aiohttp.WSMsgType.CLOSED):
-                raise ConnectionError(f"websocket closed ({self._ws.close_code})")
+                raise RemoteClosedError(self._ws.close_code)
             if msg.type == aiohttp.WSMsgType.ERROR:
                 raise ConnectionError(f"websocket error: {self._ws.exception()}")
             # text frames are not allowed in SHIP; ignore pings handled by aiohttp
