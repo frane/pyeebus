@@ -14,10 +14,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
+          cache: false
       - name: Build ship-go interop harness
         working-directory: interop/ship-go-harness
         run: |
           go get github.com/enbility/ship-go@a84426bc38105a14b50dad23c0615bff0430af7b
+          go mod tidy
           go build -o harness .
       - run: pip install -e ".[test]"
       - run: pytest
