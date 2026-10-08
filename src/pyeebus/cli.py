@@ -1,4 +1,4 @@
-"""pyeebus command line: discover SHIP devices and test a connection."""
+"""pyeebus command line: discover EEBUS devices, connect as an energy manager, simulate an EVSE."""
 
 from __future__ import annotations
 
@@ -8,17 +8,13 @@ import json
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
-from .ship import (
-    Identity,
-    RemoteAbortError,
-    ShipNode,
-    State,
-    TrustStore,
-    is_ski_valid,
-    normalize_ski,
-)
+from .service import EebusService
+from .ship import Identity, RemoteAbortError, State, TrustStore, is_ski_valid, normalize_ski
 from .ship.mdns import ShipMdns, ShipService
+from .spine import Change, Event, EventType, RemoteDevice, RemoteEntity
+from .usecases import ALL_EV_USE_CASES, EVCC, EVCEM, EVSECC, OPEV, OSCEV, DataNotAvailable, UseCase
 
 CONFIG_DIR = Path.home() / ".config" / "pyeebus"
 
@@ -45,46 +41,142 @@ async def discover(seconds: float) -> int:
     return 0
 
 
-async def connect(ski: str, host: str | None, port: int, local_port: int,
-                  config: Path) -> int:
+# --- connect -------------------------------------------------------------------------------
+
+
+def _entity_line(entity: RemoteEntity) -> str:
+    addr = ".".join(str(e) for e in entity.entity)
+    features = []
+    for f in entity.features:
+        fns = ", ".join(
+            f"{fn}{'(rw)' if ops.write else ''}" for fn, ops in f.operations.items())
+        features.append(f"      {f.id:>2} {f.type} {f.role}" + (f": {fns}" if fns else ""))
+    return f"  [{addr}] {entity.type}" + (f" - {entity.description}" if entity.description else "") + (
+        "\n" + "\n".join(features) if features else "")
+
+
+def _print_device(device: RemoteDevice) -> None:
+    print(f"\nSPINE device {device.address} ({device.device_type}, feature set {device.feature_set})")
+    for entity in device.entities:
+        print(_entity_line(entity))
+
+
+def _use_cases_text(device: RemoteDevice) -> str:
+    lines = ["Use cases announced by the device:"]
+    for info in device.use_cases():
+        addr = ".".join(str(e) for e in (info.get("address") or {}).get("entity", []))
+        for support in info.get("useCaseSupport", []):
+            available = "" if support.get("useCaseAvailable", True) else " (not available)"
+            lines.append(f"  {info.get('actor')} [{addr}] {support.get('useCaseName')} "
+                         f"{support.get('useCaseVersion', '')} scenarios {support.get('scenarioSupport')}{available}")
+    return "\n".join(lines)
+
+
+def _value(fn, *args) -> Any:
+    try:
+        return fn(*args)
+    except (DataNotAvailable, KeyError, IndexError, TypeError):
+        return None
+
+
+def _status(ucs: dict[str, UseCase], entity: RemoteEntity) -> str:
+    parts = []
+    if entity.type == "EVSE":
+        evsecc: EVSECC = ucs["EVSECC"]
+        if (m := _value(evsecc.manufacturer_data, entity)) is not None:
+            parts.append(f"{m.get('brandName', '')} {m.get('deviceName', '')} "
+                         f"sw {m.get('softwareRevision', '?')}".strip())
+        if (s := _value(evsecc.operating_state, entity)) is not None:
+            parts.append(f"state {s[0]}" + (f" error {s[1]}" if s[1] else ""))
+    elif entity.type == "EV":
+        evcc: EVCC = ucs["EVCC"]
+        evcem: EVCEM = ucs["EVCEM"]
+        opev: OPEV = ucs["OPEV"]
+        oscev: OSCEV = ucs["OSCEV"]
+        parts.append(f"charge state {evcc.charge_state(entity)}")
+        if (v := _value(evcc.communication_standard, entity)) and v != "unknown":
+            parts.append(v)
+        if (v := _value(evcem.current_per_phase, entity)) is not None:
+            parts.append(f"current {v} A")
+        if (v := _value(evcem.power_per_phase, entity)) is not None:
+            parts.append(f"power {v} W")
+        if (v := _value(evcem.energy_charged, entity)) is not None:
+            parts.append(f"energy {v} Wh")
+        if (v := _value(opev.current_limits, entity)) is not None:
+            parts.append(f"current range min {v[0]} max {v[1]} A")
+        if (v := _value(opev.load_control_limits, entity)) is not None:
+            parts.append("OPEV limits " + ", ".join(
+                f"{lim.value:g}{'' if lim.is_active else ' (inactive)'}" for lim in v))
+        if (v := _value(oscev.load_control_limits, entity)) is not None:
+            parts.append("OSCEV limits " + ", ".join(
+                f"{lim.value:g}{'' if lim.is_active else ' (inactive)'}" for lim in v))
+    return "; ".join(parts)
+
+
+async def connect(ski: str, host: str | None, port: int, local_port: int, config: Path,
+                  raw: bool) -> int:
     identity = Identity.load_or_create(config, "pyeebus")
     trust = TrustStore.load(config / "trust.json")
-    node = ShipNode(identity, ship_id=f"pyeebus-{identity.ski[:8]}", brand="pyeebus",
-                    model="pyeebus-cli", device_type="EnergyManagementSystem",
-                    port=local_port, trust=trust, auto_connect=host is None)
+    service = EebusService(identity, brand="pyeebus", model="pyeebus-cli", serial=identity.ski[:8],
+                           ship_id=f"pyeebus-{identity.ski[:8]}", port=local_port, trust=trust,
+                           auto_connect=host is None)
+    cem = service.entities[0]
+    last: dict[tuple, str] = {}
+
+    def on_uc_event(_ski: str, entity: RemoteEntity | None, name: str) -> None:
+        if entity is None or name == UseCase.USE_CASE_SUPPORT_UPDATE:
+            return
+        line = _status(ucs, entity)
+        key = (entity.device.ski, entity.entity)
+        if line and line != "charge state unknown" and last.get(key) != line:
+            last[key] = line
+            print(f"  {entity.type} [{'.'.join(map(str, entity.entity))}]: {line}")
+
+    ucs = {cls.__name__: cls(cem, on_uc_event).setup() for cls in ALL_EV_USE_CASES}
+
+    def on_spine_event(event: Event) -> None:
+        if event.type == EventType.DEVICE and event.change == Change.ADD and event.device:
+            _print_device(event.device)
+        elif event.type == EventType.DEVICE and event.change == Change.REMOVE:
+            print("SPINE device gone")
+        elif event.type == EventType.ENTITY and event.entity and event.change == Change.ADD:
+            if event.device and event.device.address and len(event.entity.entity) > 1:
+                print("\nEntity added:\n" + _entity_line(event.entity))
+        elif event.type == EventType.ENTITY and event.entity and event.change == Change.REMOVE:
+            print(f"\nEntity removed: {event.entity.type} {list(event.entity.entity)}")
+        elif event.type == EventType.DATA and event.function == "nodeManagementUseCaseData" and event.device:
+            text = _use_cases_text(event.device)
+            if last.get(("use cases", event.device.ski)) != text:
+                last[("use cases", event.device.ski)] = text
+                print("\n" + text)
+
+    service.device.subscribe_events(on_spine_event)
+    if raw:
+        service.trace = lambda _ski, direction, payload: print(
+            f"{'<<' if direction == 'in' else '>>'} {json.dumps(payload, separators=(',', ':'))}")
+
     print(f"Our SKI: {identity.ski}")
     print("In the wallbox, pair with the EEBUS device 'pyeebus' / this SKI "
           "(Elli: Connections > HEMS connection > found EEBUS devices > Pair).\n")
 
     def on_state(remote: str, state: State, err: Exception | None) -> None:
         if state == State.HELLO_WAITING_FOR_TRUST:
-            return  # reported as rejection below
-        if isinstance(err, RemoteAbortError):
-            print(f"[{remote[:8]}] not paired yet: pair 'pyeebus' in the wallbox UI, "
-                  "retrying ...")
             return
-        extra = f": {err}" if err else ""
-        print(f"[{remote[:8]}] SHIP {state.value}{extra}")
+        if isinstance(err, RemoteAbortError):
+            print(f"[{remote[:8]}] not paired yet: pair 'pyeebus' in the wallbox UI, retrying ...")
+            return
+        if state in (State.COMPLETE, State.CLOSED, State.ERROR):
+            print(f"[{remote[:8]}] SHIP {state.value}" + (f": {err}" if err else ""))
 
-    def on_connected(conn) -> None:
-        print(f"[{conn.remote_ski[:8]}] connected, remote SHIP id {conn.remote_ship_id!r}. "
-              "SPINE messages from the remote follow:")
-
-        def dump(payload: dict) -> None:
-            print(json.dumps(payload, indent=1)[:4000])
-
-        conn.on_data = dump
-
-    node.on_state = on_state
-    node.on_connected = on_connected
-    await node.start()
-    node.trust_ski(ski)
+    service.node.on_state = on_state
+    await service.start()
+    service.trust(ski)
     try:
         if host:
             while True:
                 delay = 5
                 try:
-                    conn = await node.connect(host, port, ski)
+                    conn = await service.node.connect(host, port, ski)
                     await conn.wait_closed()
                 except RemoteAbortError:
                     delay = 15
@@ -95,7 +187,39 @@ async def connect(ski: str, host: str | None, port: int, local_port: int,
             print("Waiting for the device via mDNS (Ctrl+C to stop) ...")
             await asyncio.Event().wait()
     finally:
-        await node.stop()
+        await service.stop()
+
+
+# --- simulator -------------------------------------------------------------------------------
+
+
+async def simulate(config: Path, port: int, trust_ski: str | None) -> int:
+    from .simulator import SimulatedEVSE
+
+    identity = Identity.load_or_create(config / "sim-evse", "pyeebus-sim-evse")
+    trust = TrustStore.load(config / "sim-evse" / "trust.json")
+    sim = SimulatedEVSE(identity, port=port, trust=trust)
+    if trust_ski:
+        sim.service.trust(trust_ski)
+    await sim.start()
+    print(f"Simulated EVSE running on port {sim.service.node.port}, SKI {identity.ski}")
+    print("Commands: plug, unplug, charge <A> <Wh>, limits, quit")
+    loop = asyncio.get_running_loop()
+    while True:
+        line = (await loop.run_in_executor(None, sys.stdin.readline)).strip()
+        if not line or line == "quit":
+            break
+        cmd, *args = line.split()
+        if cmd == "plug":
+            sim.plug_in()
+        elif cmd == "unplug":
+            sim.unplug()
+        elif cmd == "charge" and len(args) == 2:
+            sim.set_charging(float(args[0]), float(args[1]))
+        elif cmd == "limits":
+            print(sim.limits)
+    await sim.stop()
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -104,11 +228,16 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     sp = sub.add_parser("discover", help="list EEBUS devices on the network")
     sp.add_argument("--seconds", type=float, default=5)
-    sp = sub.add_parser("connect", help="pair with and connect to a device by SKI")
+    sp = sub.add_parser("connect", help="pair with a device and act as energy manager (CEM)")
     sp.add_argument("ski", help="SKI of the device (from 'discover' or its web UI)")
     sp.add_argument("--host", help="connect directly instead of waiting for mDNS")
     sp.add_argument("--port", type=int, default=4712)
     sp.add_argument("--local-port", type=int, default=4712)
+    sp.add_argument("--config", type=Path, default=CONFIG_DIR)
+    sp.add_argument("--raw", action="store_true", help="print all SPINE messages")
+    sp = sub.add_parser("simulate-evse", help="run a simulated wallbox (for development)")
+    sp.add_argument("--port", type=int, default=4713)
+    sp.add_argument("--trust", help="SKI of the energy manager to accept")
     sp.add_argument("--config", type=Path, default=CONFIG_DIR)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.WARNING,
@@ -116,10 +245,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "discover":
             return asyncio.run(discover(args.seconds))
+        if args.cmd == "simulate-evse":
+            return asyncio.run(simulate(args.config, args.port, args.trust))
         if not is_ski_valid(args.ski):
             parser.error("SKI must be 40 hex characters")
         return asyncio.run(connect(normalize_ski(args.ski), args.host, args.port,
-                                   args.local_port, args.config))
+                                   args.local_port, args.config, args.raw))
     except KeyboardInterrupt:
         return 130
 

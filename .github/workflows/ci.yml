@@ -21,7 +21,14 @@ jobs:
           go get github.com/enbility/ship-go@a84426bc38105a14b50dad23c0615bff0430af7b
           go mod tidy
           go build -o harness .
+      - name: Build eebus-go interop harness
+        working-directory: interop/eebus-go-harness
+        run: |
+          ./fetch-deps.sh
+          go mod tidy
+          go build -o harness .
       - run: pip install -e ".[test]"
       - run: pytest
         env:
           SHIP_GO_HARNESS: ${{ github.workspace }}/interop/ship-go-harness/harness
+          EEBUS_GO_HARNESS: ${{ github.workspace }}/interop/eebus-go-harness/harness

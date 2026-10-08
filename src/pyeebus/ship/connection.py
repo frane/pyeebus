@@ -53,7 +53,8 @@ class ShipConnection:
         self.remote_ship_id = remote_ship_id
         self.state = State.CMI
         self.error: Exception | None = None
-        self.on_data: DataHandler | None = None
+        self._on_data: DataHandler | None = None
+        self._early_data: list[dict[str, Any]] = []  # received before on_data was set
         self._allow_waiting_for_trust = allow_waiting_for_trust
         self._on_state = on_state
         self._inbox: asyncio.Queue[bytes | Exception] = asyncio.Queue()
@@ -99,6 +100,23 @@ class ShipConnection:
                 await self.transport.send(model.connection_close("announce", reason, 500))
             await asyncio.sleep(0.1)
         await self._shutdown(State.CLOSED)
+
+    @property
+    def on_data(self) -> DataHandler | None:
+        return self._on_data
+
+    @on_data.setter
+    def on_data(self, handler: DataHandler | None) -> None:
+        """Set the SPINE payload handler; payloads that arrived earlier are replayed."""
+        self._on_data = handler
+        early, self._early_data = self._early_data, []
+        for payload in early if handler else []:
+            try:
+                result = handler(payload)
+                if asyncio.iscoroutine(result):
+                    asyncio.ensure_future(result)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("SPINE handler failed")
 
     async def wait_closed(self) -> None:
         await self._closed.wait()
@@ -325,10 +343,14 @@ class ShipConnection:
         except Exception:  # noqa: BLE001
             _LOGGER.debug("%s: unparsable data message", self.remote_ski[:8])
             return
-        if not isinstance(payload, dict) or self.on_data is None:
+        if not isinstance(payload, dict):
+            return
+        if self._on_data is None:
+            if len(self._early_data) < 100:
+                self._early_data.append(payload)
             return
         try:
-            result = self.on_data(payload)
+            result = self._on_data(payload)
             if asyncio.iscoroutine(result):
                 await result
         except Exception:  # noqa: BLE001
