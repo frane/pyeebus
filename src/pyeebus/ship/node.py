@@ -148,10 +148,16 @@ class ShipNode:
 
     # --- trust ---------------------------------------------------------------------
 
-    def trust_ski(self, ski: str) -> None:
-        """Trust a remote node and (if discovered) connect to it."""
+    def trust_ski(self, ski: str, cert_pem: bytes | None = None) -> None:
+        """Trust a remote node and (if discovered) connect to it.
+
+        With its certificate, the node can also connect to us (see the README on
+        Python's ssl limitation).
+        """
         ski = normalize_ski(ski)
-        self.trust.trust(ski)
+        self.trust.trust(ski, cert_pem)
+        if cert_pem is not None and self._server_ctx is not None:
+            transport.add_trusted_cert(self._server_ctx, cert_pem)
         if self.mdns and ski in self.mdns.services:
             self._schedule_connect(self.mdns.services[ski])
 

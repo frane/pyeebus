@@ -81,9 +81,9 @@ class EebusService:
         for task in self._writers.values():
             task.cancel()
 
-    def trust(self, ski: str) -> None:
+    def trust(self, ski: str, cert_pem: bytes | None = None) -> None:
         """Pair with a remote device (the remote side has to trust us as well)."""
-        self.node.trust_ski(ski)
+        self.node.trust_ski(ski, cert_pem)
 
     async def untrust(self, ski: str) -> None:
         await self.node.untrust_ski(ski)
