@@ -13,7 +13,8 @@ from typing import Any
 from .service import EebusService
 from .ship import Identity, RemoteAbortError, State, TrustStore, is_ski_valid, normalize_ski
 from .ship.mdns import ShipMdns, ShipService
-from .spine import Change, Event, EventType, RemoteDevice, RemoteEntity, Role, spawn
+from .spine import Change, Event, EventType, RemoteDevice, RemoteEntity, Role, scaled_number, spawn
+from .spine.device import partial_filter
 from .usecases import (
     ALL_EV_USE_CASES,
     EVCC,
@@ -23,6 +24,7 @@ from .usecases import (
     MPC,
     OPEV,
     OSCEV,
+    ClientFeature,
     DataNotAvailable,
     LoadLimit,
     UseCase,
@@ -193,15 +195,39 @@ async def connect(ski: str, host: str | None, port: int, local_port: int, config
     async def write_limit(entity: RemoteEntity) -> None:
         try:
             if lpc_release:
-                current = ucs["LPC"].consumption_limit(entity)
-                await ucs["LPC"].write_consumption_limit(entity, LoadLimit(current.value, False))
-                print("  LPC limit released (inactive)")
+                await release_limit(entity)
                 return
             await ucs["LPC"].write_consumption_limit(
                 entity, LoadLimit(lpc_limit, True, duration=lpc_duration or None))
             print(f"  LPC limit {lpc_limit:g} W accepted")
         except Exception as err:  # noqa: BLE001
             print(f"  LPC write failed: {err!r}")
+
+    async def release_limit(entity: RemoteEntity) -> None:
+        """Try several ways to lift the limit; devices differ in what they accept."""
+        lpc: LPC = ucs["LPC"]
+        limit_id = lpc._limit_description(entity)["limitId"]
+        feature = ClientFeature("LoadControl", cem, entity)
+        try:
+            nominal = lpc.consumption_nominal_max(entity)
+        except DataNotAvailable:
+            nominal = None
+        attempts = [
+            ("inactive", {"limitId": limit_id, "isLimitActive": False}),
+            ("inactive, 0 W", {"limitId": limit_id, "isLimitActive": False, "value": scaled_number(0)}),
+        ]
+        if nominal:
+            attempts.append((f"active at nominal max {nominal:g} W",
+                             {"limitId": limit_id, "isLimitActive": True, "value": scaled_number(round(nominal))}))
+        for label, item in attempts:
+            try:
+                await feature.write("loadControlLimitListData", {"loadControlLimitData": [item]},
+                                    [partial_filter()])
+            except Exception as err:  # noqa: BLE001
+                print(f"  release ({label}) failed: {err!r}")
+                continue
+            print(f"  LPC limit released ({label})")
+            return
 
     async def write_failsafe_limit(entity: RemoteEntity) -> None:
         try:
