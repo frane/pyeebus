@@ -1,6 +1,7 @@
-// Interop harness: an eebus-go CEM (EVSECC, EVCC, EVCEM, OPEV, OSCEV) or a spine-go
-// based EVSE with an EV entity, to test pyeebus' SPINE layer and use cases against
-// the Go reference. It only accepts connections from the trusted SKI.
+// Interop harness: an eebus-go CEM (EVSECC, EVCC, EVCEM, OPEV, OSCEV), a spine-go
+// based EVSE with an EV entity, an eebus-go controllable system (LPC, MPC) or an
+// eebus-go Energy Guard (LPC, MPC monitoring), to test pyeebus (and tools built on it)
+// against the Go reference. It only accepts connections from the trusted SKI.
 //
 // Output lines (stdout) are meant for the tests: SKI, READY, CONNECTED, EVENT, ...
 package main
@@ -29,6 +30,8 @@ import (
 	"github.com/enbility/eebus-go/usecases/cem/opev"
 	"github.com/enbility/eebus-go/usecases/cem/oscev"
 	cslpc "github.com/enbility/eebus-go/usecases/cs/lpc"
+	eglpc "github.com/enbility/eebus-go/usecases/eg/lpc"
+	mampc "github.com/enbility/eebus-go/usecases/ma/mpc"
 	mumpc "github.com/enbility/eebus-go/usecases/mu/mpc"
 	shipapi "github.com/enbility/ship-go/api"
 	"github.com/enbility/ship-go/cert"
@@ -60,6 +63,10 @@ type harness struct {
 	verbose bool
 	cslpc   *cslpc.LPC
 	mumpc   *mumpc.MPC
+	eglpc   *eglpc.LPC
+	mampc   *mampc.MPC
+	egEVSE  spineapi.EntityRemoteInterface
+	egLimit float64
 }
 
 // --- service reader / logging -------------------------------------------------------
@@ -194,6 +201,59 @@ func (h *harness) setupCEM() {
 		if err := h.svc.AddUseCase(uc); err != nil {
 			panic(err)
 		}
+	}
+}
+
+// --- Energy Guard (LPC) and Monitoring Appliance (MPC): a HEMS like Solar Manager -----
+
+func (h *harness) egEvent(_ string, _ spineapi.DeviceRemoteInterface, entity spineapi.EntityRemoteInterface, event api.EventType) {
+	switch event {
+	case eglpc.UseCaseSupportUpdate:
+		if entity != nil && entity.EntityType() == model.EntityTypeTypeEVSE && h.egEVSE == nil {
+			h.egEVSE = entity
+			say("EG_EVSE")
+		}
+	case eglpc.DataUpdateLimit:
+		if l, err := h.eglpc.ConsumptionLimit(entity); err == nil {
+			say("EG_LIMIT %s %t", floats([]float64{l.Value}), l.IsActive)
+		}
+	case eglpc.DataUpdateFailsafeConsumptionActivePowerLimit:
+		if v, err := h.eglpc.FailsafeConsumptionActivePowerLimit(entity); err == nil {
+			say("EG_FAILSAFE %s", floats([]float64{v}))
+		}
+	case eglpc.DataUpdateHeartbeat:
+		say("EG_HEARTBEAT")
+	case mampc.DataUpdatePower:
+		if v, err := h.mampc.Power(entity); err == nil {
+			say("MPC_POWER %s", floats([]float64{v}))
+		}
+	}
+}
+
+func (h *harness) setupEG() {
+	local := h.svc.LocalDevice().EntityForType(model.EntityTypeTypeCEM)
+	h.eglpc = eglpc.NewLPC(local, h.egEvent)
+	h.mampc = mampc.NewMPC(local, h.egEvent)
+	for _, uc := range []api.UseCaseInterface{h.eglpc, h.mampc} {
+		if err := h.svc.AddUseCase(uc); err != nil {
+			panic(err)
+		}
+	}
+	h.eglpc.StartHeartbeat()
+}
+
+// write an LPC limit to the EVSE found via use case discovery
+func (h *harness) egWrite(value float64, active bool, duration time.Duration) {
+	if h.egEVSE == nil {
+		say("WRITE_ERROR no EVSE")
+		return
+	}
+	limit := ucapi.LoadLimit{Value: value, IsActive: active, Duration: duration}
+	_, err := h.eglpc.WriteConsumptionLimit(h.egEVSE, limit, func(r model.ResultDataType, _ model.MsgCounterType) {
+		say("WRITE_RESULT %d", *r.ErrorNumber)
+	})
+	if err != nil {
+		say("WRITE_ERROR %s", err)
 	}
 }
 
@@ -401,7 +461,7 @@ func (h *harness) HandleEvent(payload spineapi.EventPayload) {
 }
 
 func main() {
-	mode := flag.String("mode", "cem", "cem, evse or lpc")
+	mode := flag.String("mode", "cem", "cem, evse, lpc or eg")
 	port := flag.Int("port", 4811, "listen port")
 	trust := flag.String("trust", "", "remote SKI to trust")
 	certOut := flag.String("cert-out", "", "write own certificate PEM here")
@@ -441,6 +501,8 @@ func main() {
 		h.setupEVSE()
 	} else if *mode == "lpc" {
 		h.setupLPC()
+	} else if *mode == "eg" {
+		h.setupEG()
 	} else {
 		h.setupCEM()
 	}
@@ -470,6 +532,17 @@ func main() {
 		case "power":
 			p, _ := strconv.ParseFloat(parts[1], 64)
 			h.updatePower(p)
+		case "limit":
+			v, _ := strconv.ParseFloat(parts[1], 64)
+			d := time.Duration(0)
+			if len(parts) > 2 {
+				secs, _ := strconv.ParseFloat(parts[2], 64)
+				d = time.Duration(secs * float64(time.Second))
+			}
+			h.egLimit = v
+			h.egWrite(v, true, d)
+		case "release":
+			h.egWrite(h.egLimit, false, 0)
 		case "quit":
 			h.svc.Shutdown()
 			return
