@@ -28,7 +28,10 @@ jobs:
           go mod tidy
           go build -o harness .
       - run: pip install -e ".[test]"
-      - run: pytest
+      - run: pytest --junitxml=report.xml
         env:
           SHIP_GO_HARNESS: ${{ github.workspace }}/interop/ship-go-harness/harness
           EEBUS_GO_HARNESS: ${{ github.workspace }}/interop/eebus-go-harness/harness
+      - name: Report failed tests
+        if: failure()
+        run: python .github/scripts/report_failures.py report.xml
