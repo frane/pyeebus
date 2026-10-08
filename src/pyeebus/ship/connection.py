@@ -85,6 +85,7 @@ class ShipConnection:
             await self._fail(err)
             raise
         self._set_state(State.COMPLETE)
+        self._flush_early_data()
 
     async def send_spine(self, payload: dict[str, Any]) -> None:
         if not self.is_complete and self.state != State.ACCESS_METHODS:
@@ -109,8 +110,14 @@ class ShipConnection:
     def on_data(self, handler: DataHandler | None) -> None:
         """Set the SPINE payload handler; payloads that arrived earlier are replayed."""
         self._on_data = handler
+        self._flush_early_data()
+
+    def _flush_early_data(self) -> None:
+        handler = self._on_data
+        if handler is None or self.state not in (State.ACCESS_METHODS, State.COMPLETE):
+            return
         early, self._early_data = self._early_data, []
-        for payload in early if handler else []:
+        for payload in early:
             try:
                 result = handler(payload)
                 if asyncio.iscoroutine(result):
@@ -334,8 +341,10 @@ class ShipConnection:
             _LOGGER.debug("%s: ignoring control message %s", self.remote_ski[:8], list(body))
 
     async def _handle_data(self, message: bytes) -> None:
-        if self.state not in (State.ACCESS_METHODS, State.COMPLETE):
-            _LOGGER.debug("%s: dropping data outside data exchange", self.remote_ski[:8])
+        # The remote may start sending data as soon as its own PIN phase is done,
+        # which can be before our handshake task has processed its PIN message
+        # (ship-go does). Keep such data until our side of the handshake is done.
+        if self.state in (State.CLOSED, State.ERROR):
             return
         try:
             _, body = model.parse(message)
@@ -345,9 +354,11 @@ class ShipConnection:
             return
         if not isinstance(payload, dict):
             return
-        if self._on_data is None:
+        if (self._on_data is None or self._early_data
+                or self.state not in (State.ACCESS_METHODS, State.COMPLETE)):
             if len(self._early_data) < 100:
                 self._early_data.append(payload)
+            self._flush_early_data()
             return
         try:
             result = self._on_data(payload)

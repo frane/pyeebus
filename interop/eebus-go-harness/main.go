@@ -151,7 +151,7 @@ func (h *harness) cemEvent(_ string, _ spineapi.DeviceRemoteInterface, entity sp
 		if e, err := h.evcem.EnergyCharged(entity); err == nil {
 			say("EVCEM_ENERGY %s", floats([]float64{e}))
 		}
-	case opev.DataUpdateLimit:
+	case opev.DataUpdateLimit, opev.DataUpdateCurrentLimits:
 		limits, err := h.opev.LoadControlLimits(entity)
 		if err != nil {
 			return
@@ -161,7 +161,8 @@ func (h *harness) cemEvent(_ string, _ spineapi.DeviceRemoteInterface, entity sp
 			values = append(values, l.Value)
 		}
 		say("OPEV_LIMITS %s", floats(values))
-		if !h.wrote {
+		// eebus-go may report fewer phases while data is still arriving
+		if !h.wrote && len(limits) == 3 {
 			h.wrote = true
 			write := []ucapi.LoadLimitsPhase{}
 			for _, l := range limits {

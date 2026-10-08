@@ -93,7 +93,7 @@ async def test_eebus_go_cem_controls_pyeebus_evse():
         assert await harness.expect("EVSE_MANUFACTURER") == "EVSE_MANUFACTURER SimEVSE"
 
         evse.plug_in()
-        assert await harness.expect("OPEV_LIMITS") == "OPEV_LIMITS 16,16,16"
+        await harness.expect("OPEV_LIMITS 16,16,16")
         assert await harness.expect("WRITE_RESULT") == "WRITE_RESULT 0"
         await wait_for(lambda: evse.limits["obligation"] == [10, 10, 10])
         assert await harness.expect("EVCC_STANDARD") == "EVCC_STANDARD iec61851"

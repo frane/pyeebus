@@ -221,3 +221,19 @@ async def test_pending_then_close_4452_is_rejection():
     await tr.incoming.put(RemoteClosedError(4452))
     with pytest.raises(RemoteAbortError, match="not paired"):
         await asyncio.wait_for(task, 2)
+
+
+async def test_data_during_pin_phase_is_kept():
+    """ship-go sends SPINE data right after its PIN phase, possibly before we processed it."""
+    tr = FakeTransport()
+    conn = ShipConnection(tr, Role.CLIENT, "local", "a" * 40)
+    received: list[dict] = []
+    conn.on_data = received.append
+    for message in (model.INIT_MESSAGE, model.hello("ready", 60000), model.protocol_handshake("select"),
+                    model.pin_state_none(), model.data({"datagram": {"n": 1}}),
+                    model.access_methods_request(), model.access_methods("remote-id"),
+                    model.data({"datagram": {"n": 2}})):
+        await tr.incoming.put(message)
+    await asyncio.wait_for(conn.run(), 2)
+    await asyncio.sleep(0.05)
+    assert received == [{"datagram": {"n": 1}}, {"datagram": {"n": 2}}]
