@@ -28,12 +28,15 @@ import (
 	"github.com/enbility/eebus-go/usecases/cem/evsecc"
 	"github.com/enbility/eebus-go/usecases/cem/opev"
 	"github.com/enbility/eebus-go/usecases/cem/oscev"
+	cslpc "github.com/enbility/eebus-go/usecases/cs/lpc"
+	mumpc "github.com/enbility/eebus-go/usecases/mu/mpc"
 	shipapi "github.com/enbility/ship-go/api"
 	"github.com/enbility/ship-go/cert"
 	"github.com/enbility/ship-go/mdns"
 	spineapi "github.com/enbility/spine-go/api"
 	"github.com/enbility/spine-go/model"
 	"github.com/enbility/spine-go/spine"
+	"github.com/enbility/spine-go/util"
 )
 
 var out sync.Mutex
@@ -55,6 +58,8 @@ type harness struct {
 	evse    spineapi.EntityLocalInterface
 	ev      spineapi.EntityLocalInterface
 	verbose bool
+	cslpc   *cslpc.LPC
+	mumpc   *mumpc.MPC
 }
 
 // --- service reader / logging -------------------------------------------------------
@@ -302,6 +307,76 @@ func (h *harness) measure(current, energy float64) {
 	say("MEASURED")
 }
 
+// --- LPC / MPC (controllable system, monitored unit) ---------------------------------
+
+func (h *harness) lpcEvent(_ string, _ spineapi.DeviceRemoteInterface, _ spineapi.EntityRemoteInterface, event api.EventType) {
+	switch event {
+	case cslpc.LimitWriteApprovalRequired:
+		for counter, limit := range h.cslpc.PendingConsumptionLimits() {
+			say("LPC_LIMIT %s %t %s", floats([]float64{limit.Value}), limit.IsActive, limit.Duration)
+			h.cslpc.ApproveOrDenyConsumptionLimit(counter, true, "")
+		}
+	case cslpc.ConfigurationWriteApprovalRequired:
+		for counter, configs := range h.cslpc.PendingDeviceConfigurations() {
+			for _, c := range configs {
+				if c.Value.ScaledNumber != nil {
+					say("LPC_CONFIG %s %s", c.KeyName, floats([]float64{c.Value.ScaledNumber.GetValue()}))
+				} else if c.Value.Duration != nil {
+					d, _ := c.Value.Duration.GetTimeDuration()
+					say("LPC_CONFIG %s %s", c.KeyName, d)
+				}
+			}
+			h.cslpc.ApproveOrDenyDeviceConfiguration(counter, true, "")
+		}
+	case cslpc.DataUpdateHeartbeat:
+		say("LPC_HEARTBEAT")
+	}
+}
+
+func (h *harness) setupLPC() {
+	entity := h.svc.LocalDevice().EntityForType(model.EntityTypeTypeEVSE)
+	h.cslpc = cslpc.NewLPC(entity, h.lpcEvent)
+	measured := util.Ptr(model.MeasurementValueSourceTypeMeasuredValue)
+	perPhase := mumpc.PhaseMeasurementSourceMap{"a": measured, "b": measured, "c": measured}
+	var err error
+	h.mumpc, err = mumpc.NewMPC(entity, nil,
+		&mumpc.MonitorPowerConfig{ConnectedPhases: "abc", ValueSourceTotal: measured, ValueSourcePerPhase: perPhase},
+		&mumpc.MonitorEnergyConfig{ValueSourceConsumption: measured},
+		&mumpc.MonitorCurrentConfig{ValueSourcePerPhase: perPhase},
+		&mumpc.MonitorVoltageConfig{ValueSourcePerPhase: perPhase},
+		&mumpc.MonitorFrequencyConfig{ValueSource: measured})
+	if err != nil {
+		panic(err)
+	}
+	for _, uc := range []api.UseCaseInterface{h.cslpc, h.mumpc} {
+		if err := h.svc.AddUseCase(uc); err != nil {
+			panic(err)
+		}
+	}
+	_ = h.cslpc.SetConsumptionNominalMax(11000)
+	_ = h.cslpc.SetConsumptionLimit(ucapi.LoadLimit{Value: 11000, IsChangeable: true, IsActive: false})
+	_ = h.cslpc.SetFailsafeConsumptionActivePowerLimit(4200, true)
+	_ = h.cslpc.SetFailsafeDurationMinimum(2*time.Hour, true)
+	h.updatePower(3000)
+}
+
+func (h *harness) updatePower(total float64) {
+	m := h.mumpc
+	err := m.Update(
+		m.UpdateDataPowerTotal(total, nil, nil),
+		m.UpdateDataPowerPhaseA(total/3, nil, nil), m.UpdateDataPowerPhaseB(total/3, nil, nil), m.UpdateDataPowerPhaseC(total/3, nil, nil),
+		m.UpdateDataEnergyConsumed(12345, nil, nil, nil, nil),
+		m.UpdateDataCurrentPhaseA(total/3/230, nil, nil), m.UpdateDataCurrentPhaseB(total/3/230, nil, nil), m.UpdateDataCurrentPhaseC(total/3/230, nil, nil),
+		m.UpdateDataVoltagePhaseA(230, nil, nil), m.UpdateDataVoltagePhaseB(231, nil, nil), m.UpdateDataVoltagePhaseC(232, nil, nil),
+		m.UpdateDataFrequency(50, nil, nil),
+	)
+	if err != nil {
+		say("UPDATE_ERROR %s", err)
+		return
+	}
+	say("POWER %s", floats([]float64{total}))
+}
+
 // spine-go event handler (EVSE mode): report limit writes and subscriptions
 func (h *harness) HandleEvent(payload spineapi.EventPayload) {
 	if payload.EventType == spineapi.EventTypeSubscriptionChange && payload.ChangeType == spineapi.ElementChangeAdd {
@@ -326,7 +401,7 @@ func (h *harness) HandleEvent(payload spineapi.EventPayload) {
 }
 
 func main() {
-	mode := flag.String("mode", "cem", "cem or evse")
+	mode := flag.String("mode", "cem", "cem, evse or lpc")
 	port := flag.Int("port", 4811, "listen port")
 	trust := flag.String("trust", "", "remote SKI to trust")
 	certOut := flag.String("cert-out", "", "write own certificate PEM here")
@@ -346,7 +421,7 @@ func main() {
 
 	h := &harness{verbose: *verbose}
 	deviceType, entity, category := model.DeviceTypeTypeEnergyManagementSystem, model.EntityTypeTypeCEM, shipapi.DeviceCategoryTypeEnergyManagementSystem
-	if *mode == "evse" {
+	if *mode == "evse" || *mode == "lpc" {
 		deviceType, entity, category = model.DeviceTypeTypeChargingStation, model.EntityTypeTypeEVSE, shipapi.DeviceCategoryTypeEMobility
 	}
 	cfg, err := api.NewConfiguration("Demo", "Demo", "Harness", "1", []shipapi.DeviceCategoryType{category},
@@ -364,6 +439,8 @@ func main() {
 	injectMdnsProvider(h.svc)
 	if *mode == "evse" {
 		h.setupEVSE()
+	} else if *mode == "lpc" {
+		h.setupLPC()
 	} else {
 		h.setupCEM()
 	}
@@ -390,6 +467,9 @@ func main() {
 			a, _ := strconv.ParseFloat(parts[1], 64)
 			e, _ := strconv.ParseFloat(parts[2], 64)
 			h.measure(a, e)
+		case "power":
+			p, _ := strconv.ParseFloat(parts[1], 64)
+			h.updatePower(p)
 		case "quit":
 			h.svc.Shutdown()
 			return

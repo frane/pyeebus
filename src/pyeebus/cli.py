@@ -13,8 +13,20 @@ from typing import Any
 from .service import EebusService
 from .ship import Identity, RemoteAbortError, State, TrustStore, is_ski_valid, normalize_ski
 from .ship.mdns import ShipMdns, ShipService
-from .spine import Change, Event, EventType, RemoteDevice, RemoteEntity
-from .usecases import ALL_EV_USE_CASES, EVCC, EVCEM, EVSECC, OPEV, OSCEV, DataNotAvailable, UseCase
+from .spine import Change, Event, EventType, RemoteDevice, RemoteEntity, Role, spawn
+from .usecases import (
+    ALL_EV_USE_CASES,
+    EVCC,
+    EVCEM,
+    EVSECC,
+    LPC,
+    MPC,
+    OPEV,
+    OSCEV,
+    DataNotAvailable,
+    LoadLimit,
+    UseCase,
+)
 
 CONFIG_DIR = Path.home() / ".config" / "pyeebus"
 
@@ -88,6 +100,26 @@ def _status(ucs: dict[str, UseCase], entity: RemoteEntity) -> str:
                          f"sw {m.get('softwareRevision', '?')}".strip())
         if (s := _value(evsecc.operating_state, entity)) is not None:
             parts.append(f"state {s[0]}" + (f" error {s[1]}" if s[1] else ""))
+    if entity.type != "EV":
+        lpc: LPC = ucs["LPC"]
+        mpc: MPC = ucs["MPC"]
+        if (v := _value(lpc.consumption_limit, entity)) is not None:
+            parts.append(f"LPC limit {v.value:g} W{'' if v.is_active else ' (inactive)'}"
+                         + (f" for {v.duration:g} s" if v.duration else ""))
+        if (v := _value(lpc.failsafe_consumption_limit, entity)) is not None:
+            parts.append(f"failsafe {v:g} W")
+        if (v := _value(lpc.failsafe_duration_minimum, entity)) is not None:
+            parts.append(f"failsafe duration {v / 3600:g} h")
+        if (v := _value(lpc.consumption_nominal_max, entity)) is not None:
+            parts.append(f"nominal max {v:g} W")
+        if (v := _value(mpc.power, entity)) is not None:
+            parts.append(f"power {v:g} W")
+        if (v := _value(mpc.current_per_phase, entity)) is not None:
+            parts.append(f"current {v} A")
+        if (v := _value(mpc.voltage_per_phase, entity)) is not None:
+            parts.append(f"voltage {v} V")
+        if (v := _value(mpc.energy_consumed, entity)) is not None:
+            parts.append(f"energy {v:g} Wh")
     elif entity.type == "EV":
         evcc: EVCC = ucs["EVCC"]
         evcem: EVCEM = ucs["EVCEM"]
@@ -114,7 +146,7 @@ def _status(ucs: dict[str, UseCase], entity: RemoteEntity) -> str:
 
 
 async def connect(ski: str, host: str | None, port: int, local_port: int, config: Path,
-                  raw: bool) -> int:
+                  raw: bool, read_all: bool = False, lpc_limit: float | None = None) -> int:
     identity = Identity.load_or_create(config, "pyeebus")
     trust = TrustStore.load(config / "trust.json")
     service = EebusService(identity, brand="pyeebus", model="pyeebus-cli", serial=identity.ski[:8],
@@ -126,17 +158,51 @@ async def connect(ski: str, host: str | None, port: int, local_port: int, config
     def on_uc_event(_ski: str, entity: RemoteEntity | None, name: str) -> None:
         if entity is None or name == UseCase.USE_CASE_SUPPORT_UPDATE:
             return
+        if (lpc_limit is not None and name == LPC.DATA_UPDATE_LIMIT
+                and entity.device.ski not in limit_written):
+            limit_written.add(entity.device.ski)
+            spawn(write_limit(entity))
         line = _status(ucs, entity)
         key = (entity.device.ski, entity.entity)
         if line and line != "charge state unknown" and last.get(key) != line:
             last[key] = line
             print(f"  {entity.type} [{'.'.join(map(str, entity.entity))}]: {line}")
 
-    ucs = {cls.__name__: cls(cem, on_uc_event).setup() for cls in ALL_EV_USE_CASES}
+    ucs = {cls.__name__: cls(cem, on_uc_event).setup() for cls in (*ALL_EV_USE_CASES, LPC, MPC)}
+    if read_all:
+        cem.add_feature("Bill", Role.CLIENT)
+    printed: set[tuple] = set()
+    limit_written: set[str] = set()
+
+    def read_everything(device: RemoteDevice) -> None:
+        for entity in device.entities[1:]:
+            for feature in entity.features:
+                local = cem.feature(feature.type, Role.CLIENT)
+                if feature.role != Role.SERVER or local is None:
+                    continue
+                for fn, ops in feature.operations.items():
+                    if ops.read:
+                        local.read(feature, fn)
+
+    async def write_limit(entity: RemoteEntity) -> None:
+        try:
+            await ucs["LPC"].write_consumption_limit(entity, LoadLimit(lpc_limit, True, duration=300))
+            print(f"  LPC limit {lpc_limit:g} W for 5 minutes accepted")
+        except Exception as err:  # noqa: BLE001
+            print(f"  LPC limit {lpc_limit:g} W failed: {err}")
 
     def on_spine_event(event: Event) -> None:
         if event.type == EventType.DEVICE and event.change == Change.ADD and event.device:
             _print_device(event.device)
+            if read_all:
+                read_everything(event.device)
+        elif (read_all and event.type == EventType.DATA and event.classifier == "reply" and event.feature
+              and event.function != "deviceDiagnosisHeartbeatData"
+              and (key := (event.feature.address, event.function)) not in printed):
+            printed.add(key)
+            f = event.feature
+            print(f"  [{'.'.join(map(str, f.entity.entity))}]:{f.id} {f.type} {event.function} = "
+                  f"{json.dumps(event.data, separators=(',', ':'))}")
         elif event.type == EventType.DEVICE and event.change == Change.REMOVE:
             print("SPINE device gone")
         elif event.type == EventType.ENTITY and event.entity and event.change == Change.ADD:
@@ -235,6 +301,9 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--local-port", type=int, default=4712)
     sp.add_argument("--config", type=Path, default=CONFIG_DIR)
     sp.add_argument("--raw", action="store_true", help="print all SPINE messages")
+    sp.add_argument("--read-all", action="store_true", help="read and print all data the device offers")
+    sp.add_argument("--lpc-limit", type=float, metavar="W",
+                    help="test: set this power limit (LPC) for 5 minutes")
     sp = sub.add_parser("simulate-evse", help="run a simulated wallbox (for development)")
     sp.add_argument("--port", type=int, default=4713)
     sp.add_argument("--trust", help="SKI of the energy manager to accept")
@@ -250,7 +319,8 @@ def main(argv: list[str] | None = None) -> int:
         if not is_ski_valid(args.ski):
             parser.error("SKI must be 40 hex characters")
         return asyncio.run(connect(normalize_ski(args.ski), args.host, args.port,
-                                   args.local_port, args.config, args.raw))
+                                   args.local_port, args.config, args.raw, args.read_all,
+                                   args.lpc_limit))
     except KeyboardInterrupt:
         return 130
 

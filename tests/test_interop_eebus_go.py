@@ -14,7 +14,17 @@ import pytest
 from pyeebus.service import EebusService
 from pyeebus.ship import Identity
 from pyeebus.simulator import SimulatedEVSE
-from pyeebus.usecases import EVCC, EVCEM, EVSECC, OPEV, DataNotAvailable, PhaseLimit
+from pyeebus.usecases import (
+    EVCC,
+    EVCEM,
+    EVSECC,
+    LPC,
+    MPC,
+    OPEV,
+    DataNotAvailable,
+    LoadLimit,
+    PhaseLimit,
+)
 
 HARNESS = os.environ.get("EEBUS_GO_HARNESS")
 pytestmark = pytest.mark.skipif(not HARNESS, reason="EEBUS_GO_HARNESS not set")
@@ -143,6 +153,62 @@ async def test_pyeebus_cem_controls_spine_go_evse():
 
         await harness.send("unplug")
         await wait_for(lambda: remote.entity((1, 1)) is None)
+    finally:
+        await cem.stop()
+        await harness.stop()
+
+
+async def test_pyeebus_energy_guard_controls_eebus_go_lpc_device():
+    """pyeebus LPC (Energy Guard) and MPC (Monitoring Appliance) -> eebus-go cs/lpc + mu/mpc."""
+    cem = EebusService(Identity.create("eg"), brand="pyeebus", model="TestEG", serial="1", port=0, **NODE)
+    lpc = LPC(cem.entities[0]).setup()
+    mpc = MPC(cem.entities[0]).setup()
+    port = free_port()
+    harness = await start_harness("lpc", cem.ski, port)
+    try:
+        go_ski = (await harness.expect("SKI")).split()[1]
+        cem.trust(go_ski)
+        await cem.start()
+        await cem.node.connect("127.0.0.1", port, go_ski)
+        remote = await wait_for(lambda: next(iter(cem.remote_devices.values()), None))
+        evse = await wait_for(lambda: next((e for e in remote.entities if e.type == "EVSE"), None))
+
+        assert await wait_for(lambda: lpc.is_scenario_available(evse, 1))
+        limit = await wait_for(lambda: lpc.consumption_limit(evse))
+        assert (limit.value, limit.is_active, limit.is_changeable) == (11000, False, True)
+        assert await wait_for(lambda: lpc.failsafe_consumption_limit(evse)) == 4200
+        assert lpc.failsafe_duration_minimum(evse) == 7200
+        assert await wait_for(lambda: lpc.consumption_nominal_max(evse)) == 11000
+
+        await wait_for(lambda: cem.device.has_binding(
+            cem.entities[0].feature("LoadControl", "client").address,
+            evse.feature("LoadControl", "server").address))
+        await lpc.write_consumption_limit(evse, LoadLimit(4200, True, duration=3600))
+        assert (await harness.expect("LPC_LIMIT")) == "LPC_LIMIT 4200 true 1h0m0s"
+        await wait_for(lambda: lpc.consumption_limit(evse).is_active)
+        assert lpc.consumption_limit(evse).value == 4200
+
+        await wait_for(lambda: cem.device.has_binding(
+            cem.entities[0].feature("DeviceConfiguration", "client").address,
+            evse.feature("DeviceConfiguration", "server").address))
+        await lpc.write_failsafe_consumption_limit(evse, 5000)
+        await harness.expect("LPC_CONFIG failsafeConsumptionActivePowerLimit 5000")
+        await wait_for(lambda: lpc.failsafe_consumption_limit(evse) == 5000)
+        await lpc.write_failsafe_duration_minimum(evse, 3 * 3600)
+        await harness.expect("LPC_CONFIG failsafeDurationMinimum 3h0m0s")
+
+        # the device receives our heartbeat
+        await harness.expect("LPC_HEARTBEAT", timeout=15)
+
+        # MPC
+        assert await wait_for(lambda: mpc.power(evse)) == 3000
+        assert mpc.power_per_phase(evse) == [1000, 1000, 1000]
+        assert mpc.energy_consumed(evse) == 12345
+        assert mpc.voltage_per_phase(evse) == [230, 231, 232]
+        assert mpc.frequency(evse) == 50
+        assert [round(c, 2) for c in mpc.current_per_phase(evse)] == [4.35, 4.35, 4.35]
+        await harness.send("power 6000")
+        assert await wait_for(lambda: mpc.power(evse) == 6000)
     finally:
         await cem.stop()
         await harness.stop()

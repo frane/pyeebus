@@ -177,6 +177,10 @@ def format_datetime(value: dt.datetime | None = None) -> str:
     return value.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def utcnow() -> dt.datetime:
+    return dt.datetime.now(dt.UTC)
+
+
 def parse_datetime(text: str) -> dt.datetime:
     return dt.datetime.fromisoformat(text)
 

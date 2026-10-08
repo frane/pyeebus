@@ -16,7 +16,8 @@ EEBUS is how energy managers talk to wallboxes, heat pumps and grid control boxe
 | SHIP: mDNS announce and discovery (`zeroconf`), trust store, auto-reconnect | ✅ |
 | SPINE: devices/entities/features, detailed discovery, use case data, subscriptions, bindings, partial updates, heartbeat | ✅ tested against spine-go |
 | Use cases (CEM side): EVSECC, EVCC, EVCEM, OPEV, OSCEV, EVSOC | ✅ tested against eebus-go |
-| Coordinated EV charging (CEVC), grid use cases (LPC etc.) | later |
+| Limitation and monitoring of power consumption: LPC (Energy Guard), MPC (Monitoring Appliance) | ✅ tested against eebus-go |
+| Coordinated EV charging (CEVC), production use cases (LPP etc.) | later |
 
 ## Try it
 
@@ -25,7 +26,9 @@ pip install pyeebus   # or: uvx pyeebus ...
 
 pyeebus discover                     # list EEBUS devices on the network
 pyeebus connect <SKI of the device>  # pair, connect as energy manager, show what the device offers
+pyeebus connect <SKI> --read-all     # ... and print all data the device offers
 pyeebus connect <SKI> --raw          # ... and print every SPINE message
+pyeebus connect <SKI> --lpc-limit 4200   # test: limit the power to 4200 W for 5 minutes (LPC)
 ```
 
 `connect` announces pyeebus on the network as an energy manager. Then pair with it on the device. For example, on an Elli wallbox: *Connections → HEMS connection → found EEBUS devices → Pair*. The identity is kept in `~/.config/pyeebus/`.
@@ -53,6 +56,8 @@ service.trust("<SKI of the wallbox>")          # connects as soon as it is found
 # later, with the EV entity from an event:
 await opev.write_load_control_limits(ev, [PhaseLimit(p, 10) for p in "abc"])   # 10 A
 ```
+
+For devices that offer power limitation (LPC, e.g. wallboxes with §14a EnWG support) use `LPC` and `MPC`: `await lpc.write_consumption_limit(evse, LoadLimit(4200, duration=3600))`, `mpc.power(evse)`, `mpc.energy_consumed(evse)`.
 
 The use cases follow eebus-go: `evcc.charge_state(ev)`, `evcc.communication_standard(ev)`, `evcem.energy_charged(ev)`, `opev.current_limits(ev)` (min/max/default per phase) and so on. Values the device has not sent yet raise `DataNotAvailable`.
 
