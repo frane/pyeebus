@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/x509"
 	"encoding/pem"
 	"flag"
@@ -38,7 +39,9 @@ func (r *reader) ServicePairingDetailUpdate(id api.ServiceIdentity, d *api.Conne
 }
 func (r *reader) AllowWaitingForTrust(id api.ServiceIdentity) bool { return true }
 
-type echo struct{ w api.ShipConnectionDataWriterInterface }
+type echo struct {
+	w api.ShipConnectionDataWriterInterface
+}
 
 func (e *echo) HandleShipPayloadMessage(msg []byte) {
 	fmt.Println("PAYLOAD", string(msg))
@@ -92,7 +95,10 @@ func main() {
 	if *trust != "" {
 		h.RegisterRemoteService(api.NewServiceIdentity(*trust, "", ""))
 	}
+	fmt.Println("READY")
 	if *dial != "" && stub.cb != nil {
+		// dial only once the test has registered our certificate (it sends a line)
+		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
 		host, p, _ := net.SplitHostPort(*dial)
 		var portNum int
 		fmt.Sscanf(p, "%d", &portNum)
@@ -100,7 +106,6 @@ func main() {
 			"register": "false", "brand": "pyeebus", "model": "test", "type": "EnergyManagementSystem"},
 			"py", host, "_ship._tcp", []net.IP{net.ParseIP(host)}, portNum, false)
 	}
-	fmt.Println("READY")
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	<-sig

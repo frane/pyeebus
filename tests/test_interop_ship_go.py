@@ -20,7 +20,8 @@ pytestmark = pytest.mark.skipif(not HARNESS, reason="SHIP_GO_HARNESS not set")
 
 async def _start_harness(*args: str) -> tuple[asyncio.subprocess.Process, dict[str, str]]:
     proc = await asyncio.create_subprocess_exec(
-        HARNESS, *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        HARNESS, *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT)
     info: dict[str, str] = {}
     while True:
         line = (await asyncio.wait_for(proc.stdout.readline(), 10)).decode().strip()
@@ -87,6 +88,8 @@ async def test_ship_go_client_to_python_server(unused_tcp_port, tmp_path: Path):
 
         node.on_connected = on_connected
         node._remember_cert(info["ski"], _pem_to_der(cert_file.read_bytes()))  # noqa: SLF001
+        proc.stdin.write(b"dial\n")  # the harness dials once we know its certificate
+        await proc.stdin.drain()
         await asyncio.wait_for(connected.wait(), 30)
         conn = node.connections[info["ski"]]
         assert conn.remote_ship_id is not None
