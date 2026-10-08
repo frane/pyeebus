@@ -147,7 +147,8 @@ def _status(ucs: dict[str, UseCase], entity: RemoteEntity) -> str:
 
 async def connect(ski: str, host: str | None, port: int, local_port: int, config: Path,
                   raw: bool, read_all: bool = False, lpc_limit: float | None = None,
-                  lpc_duration: float = 300, write_failsafe: float | None = None) -> int:
+                  lpc_duration: float = 300, write_failsafe: float | None = None,
+                  lpc_release: bool = False) -> int:
     identity = Identity.load_or_create(config, "pyeebus")
     trust = TrustStore.load(config / "trust.json")
     service = EebusService(identity, brand="pyeebus", model="pyeebus-cli", serial=identity.ski[:8],
@@ -159,7 +160,7 @@ async def connect(ski: str, host: str | None, port: int, local_port: int, config
     def on_uc_event(_ski: str, entity: RemoteEntity | None, name: str) -> None:
         if entity is None or name == UseCase.USE_CASE_SUPPORT_UPDATE:
             return
-        if (lpc_limit is not None and name == LPC.DATA_UPDATE_LIMIT
+        if ((lpc_limit is not None or lpc_release) and name == LPC.DATA_UPDATE_LIMIT
                 and entity.device.ski not in limit_written):
             limit_written.add(entity.device.ski)
             spawn(write_limit(entity))
@@ -191,11 +192,16 @@ async def connect(ski: str, host: str | None, port: int, local_port: int, config
 
     async def write_limit(entity: RemoteEntity) -> None:
         try:
+            if lpc_release:
+                current = ucs["LPC"].consumption_limit(entity)
+                await ucs["LPC"].write_consumption_limit(entity, LoadLimit(current.value, False))
+                print("  LPC limit released (inactive)")
+                return
             await ucs["LPC"].write_consumption_limit(
                 entity, LoadLimit(lpc_limit, True, duration=lpc_duration or None))
             print(f"  LPC limit {lpc_limit:g} W accepted")
         except Exception as err:  # noqa: BLE001
-            print(f"  LPC limit {lpc_limit:g} W failed: {err!r}")
+            print(f"  LPC write failed: {err!r}")
 
     async def write_failsafe_limit(entity: RemoteEntity) -> None:
         try:
@@ -319,6 +325,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="test: set this power limit (LPC)")
     sp.add_argument("--lpc-duration", type=float, default=300, metavar="S",
                     help="duration of --lpc-limit in seconds, 0 = no end (default 300)")
+    sp.add_argument("--lpc-release", action="store_true", help="deactivate the LPC limit")
     sp.add_argument("--write-failsafe", type=float, metavar="W",
                     help="test: write this failsafe power limit (LPC)")
     sp = sub.add_parser("simulate-evse", help="run a simulated wallbox (for development)")
@@ -337,7 +344,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("SKI must be 40 hex characters")
         return asyncio.run(connect(normalize_ski(args.ski), args.host, args.port,
                                    args.local_port, args.config, args.raw, args.read_all,
-                                   args.lpc_limit, args.lpc_duration, args.write_failsafe))
+                                   args.lpc_limit, args.lpc_duration, args.write_failsafe,
+                                   args.lpc_release))
     except KeyboardInterrupt:
         return 130
 
