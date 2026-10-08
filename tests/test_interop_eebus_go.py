@@ -180,17 +180,11 @@ async def test_pyeebus_energy_guard_controls_eebus_go_lpc_device():
         assert lpc.failsafe_duration_minimum(evse) == 7200
         assert await wait_for(lambda: lpc.consumption_nominal_max(evse)) == 11000
 
-        await wait_for(lambda: cem.device.has_binding(
-            cem.entities[0].feature("LoadControl", "client").address,
-            evse.feature("LoadControl", "server").address))
         await lpc.write_consumption_limit(evse, LoadLimit(4200, True, duration=3600))
         assert (await harness.expect("LPC_LIMIT")) == "LPC_LIMIT 4200 true 1h0m0s"
         await wait_for(lambda: lpc.consumption_limit(evse).is_active)
         assert lpc.consumption_limit(evse).value == 4200
 
-        await wait_for(lambda: cem.device.has_binding(
-            cem.entities[0].feature("DeviceConfiguration", "client").address,
-            evse.feature("DeviceConfiguration", "server").address))
         await lpc.write_failsafe_consumption_limit(evse, 5000)
         await harness.expect("LPC_CONFIG failsafeConsumptionActivePowerLimit 5000")
         await wait_for(lambda: lpc.failsafe_consumption_limit(evse) == 5000)

@@ -130,9 +130,7 @@ async def test_cem_discovers_evse_and_ev(cem_and_evse):
     assert ucs["EVCC"].charge_state(ev) == "active"
     assert ("EV", EVCC.EV_CONNECTED) in events
 
-    # write limits (needs the binding OPEV made)
-    await wait_for(lambda: cem.device.has_binding(
-        cem.entities[0].feature("LoadControl", "client").address, ev.feature("LoadControl", "server").address))
+    # write limits (binds first if OPEV's binding is not done yet)
     await ucs["OPEV"].write_load_control_limits(ev, [PhaseLimit(p, 10) for p in "abc"])
     assert evse.limits["obligation"] == [10, 10, 10]
     await wait_for(lambda: [lim.value for lim in ucs["OPEV"].load_control_limits(ev)] == [10, 10, 10])

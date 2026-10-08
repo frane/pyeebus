@@ -195,10 +195,10 @@ class LPC(UseCase):
         if ops is not None and not ops.write_partial:
             merged = {i.get("limitId"): dict(i) for i in f.items(FN_LIMITS, "loadControlLimitData")}
             merged.setdefault(item["limitId"], {}).update(item)
-            await f.local.write_and_wait(f.remote, FN_LIMITS, {"loadControlLimitData": list(merged.values())},
+            await f.write(FN_LIMITS, {"loadControlLimitData": list(merged.values())},
                                          None, timeout)
         else:
-            await f.local.write_and_wait(f.remote, FN_LIMITS, {"loadControlLimitData": [item]}, filters, timeout)
+            await f.write(FN_LIMITS, {"loadControlLimitData": [item]}, filters, timeout)
 
     # failsafe values (device configuration)
     def _config(self, entity: RemoteEntity, key: str) -> tuple[ClientFeature, dict, dict | None]:
@@ -235,12 +235,12 @@ class LPC(UseCase):
         item = {"keyId": desc["keyId"], "value": value}
         ops = f.remote.operations.get(FN_CONFIG_VALUES)
         if ops is not None and ops.write_partial:
-            await f.local.write_and_wait(f.remote, FN_CONFIG_VALUES, {"deviceConfigurationKeyValueData": [item]},
+            await f.write(FN_CONFIG_VALUES, {"deviceConfigurationKeyValueData": [item]},
                                          [partial_filter()], timeout)
         else:
             merged = {i.get("keyId"): dict(i) for i in f.items(FN_CONFIG_VALUES, "deviceConfigurationKeyValueData")}
             merged.setdefault(item["keyId"], {}).update(item)
-            await f.local.write_and_wait(f.remote, FN_CONFIG_VALUES,
+            await f.write(FN_CONFIG_VALUES,
                                          {"deviceConfigurationKeyValueData": list(merged.values())}, None, timeout)
 
     async def write_failsafe_consumption_limit(self, entity: RemoteEntity, watts: float,

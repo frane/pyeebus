@@ -436,14 +436,14 @@ class _LimitUseCase(UseCase):
             raise DataNotAvailable("no writable limits")
         ops = f.remote.operations.get(FN_LIMITS)
         if ops is not None and ops.write_partial:
-            await f.local.write_and_wait(f.remote, FN_LIMITS, {"loadControlLimitData": data},
+            await f.write(FN_LIMITS, {"loadControlLimitData": data},
                                          [partial_filter()], timeout)
         else:
             # full write: merge into the known list
             merged = {i.get("limitId"): dict(i) for i in current}
             for item in data:
                 merged.setdefault(item["limitId"], {}).update(item)
-            await f.local.write_and_wait(f.remote, FN_LIMITS,
+            await f.write(FN_LIMITS,
                                          {"loadControlLimitData": list(merged.values())}, None, timeout)
 
     def set_operating_state(self, failure: bool) -> None:

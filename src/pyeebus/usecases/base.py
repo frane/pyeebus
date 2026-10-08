@@ -98,6 +98,17 @@ class ClientFeature:
         if not self.local.has_binding(self.remote):
             spawn(_quietly(self.local.bind(self.remote), f"bind {self.remote}"))
 
+    async def write(self, function: str, data: Any, filters: list[dict[str, Any]] | None = None,
+                    timeout: float | None = None) -> None:
+        """Write to the remote server feature and wait for its result.
+
+        Writes need a binding (SPINE 7.3); some devices silently drop writes
+        without one, so bind first if that has not happened yet.
+        """
+        if not self.local.has_binding(self.remote):
+            await self.local.bind(self.remote, timeout)
+        await self.local.write_and_wait(self.remote, function, data, filters, timeout)
+
     def data(self, function: str) -> Any:
         return self.remote.get(function)
 

@@ -189,7 +189,7 @@ async def connect(ski: str, host: str | None, port: int, local_port: int, config
             await ucs["LPC"].write_consumption_limit(entity, LoadLimit(lpc_limit, True, duration=300))
             print(f"  LPC limit {lpc_limit:g} W for 5 minutes accepted")
         except Exception as err:  # noqa: BLE001
-            print(f"  LPC limit {lpc_limit:g} W failed: {err}")
+            print(f"  LPC limit {lpc_limit:g} W failed: {err!r}")
 
     def on_spine_event(event: Event) -> None:
         if event.type == EventType.DEVICE and event.change == Change.ADD and event.device:
