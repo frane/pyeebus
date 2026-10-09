@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import ipaddress
 import logging
+import os
 import socket
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -69,6 +72,40 @@ def service_from_info(info: AsyncServiceInfo) -> ShipService | None:
     )
 
 
+def local_addresses() -> list[str]:
+    """IPv4 addresses to announce for this host.
+
+    ``EEBUS_ANNOUNCE_IP`` (comma separated) overrides the detection. Otherwise
+    the address used for multicast (the LAN) comes first.
+    """
+    if override := os.environ.get("EEBUS_ANNOUNCE_IP"):
+        return [a.strip() for a in override.split(",") if a.strip()]
+    def usable(addresses: list[str]) -> list[str]:
+        out: list[str] = []
+        for address in addresses:
+            try:
+                ip = ipaddress.IPv4Address(address)
+            except ValueError:
+                continue
+            if not (ip.is_loopback or ip.is_link_local or ip.is_unspecified) and address not in out:
+                out.append(address)
+        return out
+
+    routed: list[str] = []
+    for target in ("224.0.0.251", "192.0.2.1"):  # mDNS group; TEST-NET as "default route"
+        with contextlib.suppress(OSError), socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect((target, 5353))  # UDP connect sends nothing, it only picks the route
+            routed.append(s.getsockname()[0])
+    if found := usable(routed):
+        return found  # not every interface: Docker bridges etc. would only mislead peers
+    with contextlib.suppress(Exception):
+        import ifaddr
+
+        return usable([ip.ip for adapter in ifaddr.get_adapters() for ip in adapter.ips
+                       if isinstance(ip.ip, str)])
+    return []
+
+
 class ShipMdns:
     """Announce this node and track other SHIP nodes."""
 
@@ -94,7 +131,7 @@ class ShipMdns:
 
     async def announce(self, *, instance: str, ship_id: str, ski: str, port: int,
                        brand: str, model: str, device_type: str, serial: str = "",
-                       register: bool = False) -> None:
+                       register: bool = False, addresses: list[str] | None = None) -> None:
         props = {
             "txtvers": "1",
             "path": WEBSOCKET_PATH,
@@ -107,10 +144,13 @@ class ShipMdns:
         }
         if serial:
             props["serial"] = serial
-        hostname = socket.gethostname().split(".")[0] or "pyeebus"
+        # Our own host name with our own address records: relying on the
+        # system's responder (avahi, mDNSResponder) for the host name fails
+        # where there is none, e.g. on a NAS with Bonjour switched off.
         self._info = AsyncServiceInfo(
             SERVICE_TYPE, f"{instance}.{SERVICE_TYPE}", port=port, properties=props,
-            server=f"{hostname}.local.",
+            server=f"{instance}.local.",
+            addresses=[socket.inet_aton(a) for a in (addresses or local_addresses())],
         )
         await self.zeroconf.async_register_service(self._info, allow_name_change=True)
 
