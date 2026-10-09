@@ -106,7 +106,12 @@ class ClientFeature:
         without one, so bind first if that has not happened yet.
         """
         if not self.local.has_binding(self.remote):
-            await self.local.bind(self.remote, timeout)
+            try:
+                await self.local.bind(self.remote, timeout)
+            except SpineError as err:
+                # e.g. Elli: "Adding binding failed." while it still keeps the binding of a
+                # removed energy manager. Try the write anyway; the device decides.
+                _LOGGER.warning("binding to %s refused (%s), writing without binding", self.remote, err)
         await self.local.write_and_wait(self.remote, function, data, filters, timeout)
 
     def data(self, function: str) -> Any:
