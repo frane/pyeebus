@@ -2,7 +2,7 @@
 
 EEBUS for Python: SHIP (transport), SPINE (data model) and the energy manager (CEM) use cases for EV charging. Ported from the Go implementation by [enbility](https://enbility.net/) (ship-go, spine-go, eebus-go, MIT licensed).
 
-> **Status: early.** SHIP, SPINE and the EV charging use cases work and are tested against eebus-go/spine-go in both directions. Pairing with a real Elli Charger 2 works on the SHIP level; the SPINE exchange with real wallboxes is being tested.
+> **Status: 0.1.0, early.** SHIP, SPINE and the use cases (EV charging, LPC, MPC) are tested against eebus-go/spine-go in both directions and in use with a real Elli Charger 2 and Solar Manager (through [elli-eebus-proxy](https://github.com/frane/elli-eebus-proxy)). The API may still change.
 
 ## Why
 
