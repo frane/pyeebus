@@ -111,7 +111,8 @@ class AiohttpTransport:
 
 
 async def connect(host: str, port: int, path: str, identity: Identity,
-                  timeout: float = 10.0) -> tuple[AiohttpTransport, bytes]:
+                  timeout: float = 10.0, context: ssl.SSLContext | None = None,
+                  ) -> tuple[AiohttpTransport, bytes]:
     """Open a SHIP websocket to a remote node. Returns transport and peer cert (DER)."""
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"  # IPv6 literal
@@ -119,7 +120,7 @@ async def connect(host: str, port: int, path: str, identity: Identity,
     session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, connect=timeout))
     try:
         ws = await session.ws_connect(
-            url, ssl=client_context(identity), protocols=(SUBPROTOCOL,),
+            url, ssl=context or client_context(identity), protocols=(SUBPROTOCOL,),
             heartbeat=PING_INTERVAL, max_msg_size=MAX_MESSAGE_SIZE, autoping=True,
         )
     except Exception:

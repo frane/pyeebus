@@ -80,6 +80,40 @@ def test_ski_mismatch_rejected():
         ski_from_certificate(cert.public_bytes(serialization.Encoding.DER))
 
 
+# Elli Gen 1 wallboxes (Skoda iV, VW ID. Charger, firmware 3.9) encode BasicConstraints
+# cA TRUE as 0x01 instead of 0xFF, which cryptography refuses (ha-elli #1, #2).
+_DER_CA_TRUE = bytes.fromhex("0603551d130101ff040530030101ff")
+_BER_CA_TRUE = bytes.fromhex("0603551d130101ff04053003010101")
+
+
+def _gen1_style(identity: Identity) -> Identity:
+    from cryptography import x509
+
+    der = identity.cert_der
+    assert der.count(_DER_CA_TRUE) == 1
+    der = der.replace(_DER_CA_TRUE, _BER_CA_TRUE)
+    with pytest.raises(ValueError, match="BasicConstraints"):
+        x509.load_der_x509_certificate(der).extensions  # noqa: B018 - the bug
+    import ssl
+    return Identity(ssl.DER_cert_to_PEM_cert(der).encode(), identity.key_pem)
+
+
+def test_ski_of_a_certificate_that_is_not_strict_der():
+    ident = Identity.create("gen1")
+    expected = ski_from_certificate(ident.cert_der)
+    assert ski_from_certificate(_gen1_style(ident).cert_der) == expected
+
+
+def test_ski_mismatch_rejected_when_not_strict_der():
+    a, b = Identity.create("a"), _gen1_style(Identity.create("b"))
+    der_b = b.cert_der
+    # b's certificate with a's SKI
+    swapped = der_b.replace(bytes.fromhex(b.ski), bytes.fromhex(a.ski))
+    assert swapped != der_b
+    with pytest.raises(InvalidSkiError):
+        ski_from_certificate(swapped)
+
+
 # --- handshake over real TLS websockets ------------------------------------------------
 
 
@@ -237,3 +271,22 @@ async def test_data_during_pin_phase_is_kept():
     await asyncio.wait_for(conn.run(), 2)
     await asyncio.sleep(0.05)
     assert received == [{"datagram": {"n": 1}}, {"datagram": {"n": 2}}]
+
+
+async def test_handshake_with_a_gen1_style_certificate():
+    """The whole connection works when the wallbox's certificate is not strict DER."""
+    wallbox = ShipNode(_gen1_style(Identity.create("wallbox")), ship_id="pyeebus-wallbox",
+                       brand="pyeebus", model="wallbox", device_type="EVSE", port=0,
+                       announce=False, discover=False, host="127.0.0.1")
+    cem = _node("cem")
+    wallbox.trust.trust(cem.ski, cem.identity.cert_pem)
+    cem.trust.trust(wallbox.ski)
+    await wallbox.start()
+    await cem.start()
+    try:
+        conn = await cem.connect("127.0.0.1", wallbox.port, wallbox.ski)
+        assert conn.state == State.COMPLETE
+        await conn.close()
+    finally:
+        await cem.stop()
+        await wallbox.stop()

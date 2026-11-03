@@ -7,13 +7,13 @@ import contextlib
 import json
 import logging
 import random
+import ssl
+import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from aiohttp import web
-from cryptography import x509
-from cryptography.hazmat.primitives import serialization
 
 from . import transport
 from .cert import Identity, normalize_ski, ski_from_certificate
@@ -29,7 +29,8 @@ RETRY_REJECTED = 15.0  # remote rejected us (not paired yet): don't hammer it
 
 
 def _der_to_pem(der: bytes) -> bytes:
-    return x509.load_der_x509_certificate(der).public_bytes(serialization.Encoding.PEM)
+    # No parsing: some wallbox certificates are not strict DER (see cert._ski_extension).
+    return ssl.DER_cert_to_PEM_cert(der).encode()
 
 
 @dataclass
@@ -39,6 +40,9 @@ class TrustStore:
 
     path: Path | None = None
     peers: dict[str, str | None] = field(default_factory=dict)  # ski -> cert PEM
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+    _queued: int = field(default=0, repr=False, compare=False)
+    _written: int = field(default=0, repr=False, compare=False)
 
     @classmethod
     def load(cls, path: str | Path) -> TrustStore:
@@ -47,14 +51,32 @@ class TrustStore:
         return cls(path, peers)
 
     def save(self) -> None:
-        if self.path:
+        """Write the file; inside an event loop in a worker thread, so the loop never
+        blocks on disk (Home Assistant flags that). A later save always wins."""
+        if not self.path:
+            return
+        self._queued += 1
+        job = (self._queued, json.dumps(self.peers, indent=2))
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._write(*job)
+        else:
+            loop.run_in_executor(None, self._write, *job)
+
+    def _write(self, number: int, text: str) -> None:
+        with self._lock:
+            if number < self._written:
+                return  # a newer state is already on disk
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(self.peers, indent=2))
+            self.path.write_text(text)
+            self._written = number
 
     def trust(self, ski: str, cert_pem: bytes | None = None) -> None:
         ski = normalize_ski(ski)
-        if cert_pem is not None or ski not in self.peers:
-            self.peers[ski] = cert_pem.decode() if cert_pem else self.peers.get(ski)
+        value = cert_pem.decode() if cert_pem else self.peers.get(ski)
+        if ski not in self.peers or self.peers[ski] != value:
+            self.peers[ski] = value
             self.save()
 
     def remove(self, ski: str) -> None:
@@ -106,6 +128,7 @@ class ShipNode:
         self.on_disconnected: Callable[[str], None] | None = None
         self.on_state: Callable[[str, State, Exception | None], None] | None = None
         self._server_ctx = None
+        self._client_ctx: ssl.SSLContext | None = None
         self._runner: web.AppRunner | None = None
         self._dialing: dict[str, asyncio.Task] = {}
         self._tasks: set[asyncio.Task] = set()
@@ -114,7 +137,10 @@ class ShipNode:
     # --- lifecycle ---------------------------------------------------------------
 
     async def start(self) -> None:
-        self._server_ctx = transport.server_context(self.identity, self.trust.certificates())
+        # Loading certificates reads files (ssl needs them on disk): not in the event loop.
+        self._server_ctx, self._client_ctx = await asyncio.to_thread(
+            lambda: (transport.server_context(self.identity, self.trust.certificates()),
+                     transport.client_context(self.identity)))
         app = web.Application()
         app.router.add_get(WEBSOCKET_PATH, self._handle_incoming)
         app.router.add_get("/", self._handle_incoming)
@@ -169,6 +195,8 @@ class ShipNode:
 
     def _remember_cert(self, ski: str, der: bytes) -> None:
         pem = _der_to_pem(der)
+        if self.trust.peers.get(ski) == pem.decode():
+            return  # known: nothing to write or load
         self.trust.trust(ski, pem)
         if self._server_ctx is not None:
             transport.add_trusted_cert(self._server_ctx, pem)
@@ -181,7 +209,7 @@ class ShipNode:
         ski = normalize_ski(ski)
         if not self.trust.is_trusted(ski):
             raise ShipError(f"SKI {ski} is not trusted")
-        ws, der = await transport.connect(host, port, path, self.identity)
+        ws, der = await transport.connect(host, port, path, self.identity, context=self._client_ctx)
         try:
             remote_ski = ski_from_certificate(der)
         except Exception:
