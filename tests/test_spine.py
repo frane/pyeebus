@@ -152,6 +152,26 @@ async def test_cem_discovers_evse_and_ev(cem_and_evse):
     assert ucs["EVCC"].charge_state(None) == "unplugged"
 
 
+async def test_an_empty_measurement_item_does_not_hide_the_value(cem_and_evse):
+    """A full read without valueType plus a partial notify with it leaves two items per
+    id (seen on Elli Gen 1, ha-elli #3): the one with the value counts, in any order."""
+    cem, evse, ucs, _events = cem_and_evse
+    remote = await wait_for(lambda: next(iter(cem.remote_devices.values()), None))
+    await wait_for(lambda: next((e for e in remote.entities if e.type == "EVSE"), None))
+    evse.plug_in()
+    ev = await wait_for(lambda: remote.entity((1, 1)))
+    evse.set_charging(10, 1234)
+    assert await wait_for(lambda: ucs["EVCEM"].current_per_phase(ev) == [10, 10, 10])
+    feature = next(f for f in ev.features if f.type == "Measurement")
+    items = feature.data["measurementListData"]["measurementData"]
+    for empty_last in (False, True):
+        values = [m for m in items if m.get("value") is not None]
+        empties = [{"measurementId": m["measurementId"]} for m in values]
+        feature.data["measurementListData"]["measurementData"] = (
+            values + empties if empty_last else empties + values)
+        assert ucs["EVCEM"].current_per_phase(ev) == [10, 10, 10]
+
+
 async def test_heartbeat_is_notified_to_subscribers(cem_and_evse):
     cem, evse, _ucs, _events = cem_and_evse
     remote_cem = await wait_for(lambda: next(iter(evse.service.remote_devices.values()), None))
