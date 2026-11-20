@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pyeebus"
-version = "0.3.0"
+version = "0.4.0"
 description = "EEBUS (SHIP and SPINE) for Python, ported from the enbility Go implementation"
 readme = "README.md"
 license = "MIT"

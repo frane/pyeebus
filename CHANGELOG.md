@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0 (2026-11-20)
+
+### Added
+- **LPP**, limitation of power production (e.g. a feed-in limit), on both sides: `CsLPP` for
+  the Controllable System (eebus-go cs/lpp) and `LPP` for the Energy Guard (eebus-go eg/lpp). The
+  API uses positive watts of production; on the wire the limit follows LPP's passive sign
+  convention (<= 0 W, a positive one is rejected) [LPP-001]. CS-LPP runs its own LPP 1.0.0
+  state machine next to CS-LPC and shares the failsafe duration with it. Tested against
+  eebus-go's Energy Guard. Contributed by [@dneprojects](https://github.com/dneprojects)
+  ([#4](https://github.com/frane/pyeebus/pull/4)).
+
+### Changed
+- The CS-LPC logic moved into `CsPowerLimitation`, shared by `CsLPC` and `CsLPP`; the state
+  machine is now `LimitationState` / `LimitationStateMachine`. The 0.2.0 names (`CsLPC`
+  methods, `LPCState`, `LPCStateMachine`) keep working (@dneprojects, #4).
+
 ## 0.3.0 (2026-11-19)
 
 ### Added
