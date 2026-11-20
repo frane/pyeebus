@@ -1,6 +1,6 @@
 // Interop harness: an eebus-go CEM (EVSECC, EVCC, EVCEM, OPEV, OSCEV), a spine-go
 // based EVSE with an EV entity, an eebus-go controllable system (LPC, MPC) or an
-// eebus-go Energy Guard (LPC, MPC monitoring), to test pyeebus (and tools built on it)
+// eebus-go Energy Guard (LPC, LPP, MPC monitoring), to test pyeebus (and tools built on it)
 // against the Go reference. It only accepts connections from the trusted SKI.
 //
 // Output lines (stdout) are meant for the tests: SKI, READY, CONNECTED, EVENT, ...
@@ -31,6 +31,7 @@ import (
 	"github.com/enbility/eebus-go/usecases/cem/oscev"
 	cslpc "github.com/enbility/eebus-go/usecases/cs/lpc"
 	eglpc "github.com/enbility/eebus-go/usecases/eg/lpc"
+	eglpp "github.com/enbility/eebus-go/usecases/eg/lpp"
 	mampc "github.com/enbility/eebus-go/usecases/ma/mpc"
 	mumpc "github.com/enbility/eebus-go/usecases/mu/mpc"
 	shipapi "github.com/enbility/ship-go/api"
@@ -64,6 +65,8 @@ type harness struct {
 	cslpc       *cslpc.LPC
 	mumpc       *mumpc.MPC
 	eglpc       *eglpc.LPC
+	eglpp       *eglpp.LPP
+	egPLimit    float64
 	mampc       *mampc.MPC
 	egEVSE      spineapi.EntityRemoteInterface // the controllable system's entity
 	egLimit     float64
@@ -209,8 +212,9 @@ func (h *harness) setupCEM() {
 
 func (h *harness) egEvent(_ string, _ spineapi.DeviceRemoteInterface, entity spineapi.EntityRemoteInterface, event api.EventType) {
 	switch event {
-	case eglpc.UseCaseSupportUpdate:
-		if entity != nil && h.egEVSE == nil && h.eglpc.IsScenarioAvailableAtEntity(entity, 1) {
+	case eglpc.UseCaseSupportUpdate, eglpp.UseCaseSupportUpdate:
+		if entity != nil && h.egEVSE == nil && (h.eglpc.IsScenarioAvailableAtEntity(entity, 1) ||
+			h.eglpp.IsScenarioAvailableAtEntity(entity, 1)) {
 			h.egEVSE = entity
 			if entity.EntityType() == model.EntityTypeTypeEVSE {
 				say("EG_EVSE")
@@ -237,6 +241,14 @@ func (h *harness) egEvent(_ string, _ spineapi.DeviceRemoteInterface, entity spi
 		if !h.egHeartbeat {
 			h.egHeartbeat = true
 			say("EG_HEARTBEAT")
+		}
+	case eglpp.DataUpdateLimit:
+		if l, err := h.eglpp.ProductionLimit(entity); err == nil {
+			say("EGP_LIMIT %s %t %t", floats([]float64{l.Value}), l.IsActive, l.IsChangeable)
+		}
+	case eglpp.DataUpdateFailsafeProductionActivePowerLimit:
+		if v, err := h.eglpp.FailsafeProductionActivePowerLimit(entity); err == nil {
+			say("EGP_FAILSAFE %s", floats([]float64{v}))
 		}
 	case mampc.DataUpdatePower:
 		if v, err := h.mampc.Power(entity); err == nil {
@@ -273,7 +285,8 @@ func (h *harness) setupEG() {
 	local := h.svc.LocalDevice().EntityForType(model.EntityTypeTypeCEM)
 	h.eglpc = eglpc.NewLPC(local, h.egEvent)
 	h.mampc = mampc.NewMPC(local, h.egEvent)
-	for _, uc := range []api.UseCaseInterface{h.eglpc, h.mampc} {
+	h.eglpp = eglpp.NewLPP(local, h.egEvent)
+	for _, uc := range []api.UseCaseInterface{h.eglpc, h.eglpp, h.mampc} {
 		if err := h.svc.AddUseCase(uc); err != nil {
 			panic(err)
 		}
@@ -293,6 +306,21 @@ func (h *harness) egWrite(value float64, active bool, duration time.Duration) {
 	})
 	if err != nil {
 		say("WRITE_ERROR %s", err)
+	}
+}
+
+// write an LPP (feed-in) limit; the result is reported as PWRITE_RESULT
+func (h *harness) egWriteProduction(value float64, active bool, duration time.Duration) {
+	if h.egEVSE == nil {
+		say("PWRITE_ERROR no controllable system")
+		return
+	}
+	limit := ucapi.LoadLimit{Value: value, IsActive: active, Duration: duration}
+	_, err := h.eglpp.WriteProductionLimit(h.egEVSE, limit, func(r model.ResultDataType, _ model.MsgCounterType) {
+		say("PWRITE_RESULT %d", *r.ErrorNumber)
+	})
+	if err != nil {
+		say("PWRITE_ERROR %s", err)
 	}
 }
 
@@ -599,6 +627,32 @@ func main() {
 			h.egWrite(v, true, d)
 		case "release":
 			h.egWrite(h.egLimit, false, 0)
+		case "plimit":
+			v, _ := strconv.ParseFloat(parts[1], 64)
+			d := time.Duration(0)
+			if len(parts) > 2 {
+				secs, _ := strconv.ParseFloat(parts[2], 64)
+				d = time.Duration(secs * float64(time.Second))
+			}
+			h.egPLimit = v
+			h.egWriteProduction(v, true, d)
+		case "prelease":
+			h.egWriteProduction(h.egPLimit, false, 0)
+		case "pfailsafe":
+			v, _ := strconv.ParseFloat(parts[1], 64)
+			if h.egEVSE == nil {
+				say("WRITE_ERROR no controllable system")
+			} else if _, err := h.eglpp.WriteFailsafeProductionActivePowerLimit(h.egEVSE, v); err != nil {
+				say("WRITE_ERROR %s", err)
+			}
+		case "pnominal":
+			if h.egEVSE == nil {
+				say("NOMINAL_ERROR no controllable system")
+			} else if v, err := h.eglpp.ProductionNominalMax(h.egEVSE); err != nil {
+				say("NOMINAL_ERROR %s", err)
+			} else {
+				say("EGP_NOMINAL_MAX %s", floats([]float64{v}))
+			}
 		case "nominal":
 			// eebus-go only sends DataUpdatePowerConsumptionNominalMax for electrical connection 0
 			if h.egEVSE == nil {

@@ -16,10 +16,10 @@ EEBUS is how energy managers talk to wallboxes, heat pumps and grid control boxe
 | SHIP: mDNS announce and discovery (`zeroconf`), trust store, auto-reconnect | ✅ |
 | SPINE: devices/entities/features, detailed discovery, use case data, subscriptions, bindings, partial updates, heartbeat | ✅ tested against spine-go |
 | Use cases (CEM side): EVSECC, EVCC, EVCEM, OPEV, OSCEV, EVSOC | ✅ tested against eebus-go |
-| Limitation and monitoring of power consumption: LPC (Energy Guard), MPC (Monitoring Appliance) | ✅ tested against eebus-go |
-| Controllable System side: CS-LPC with the LPC state machine (init, limited, failsafe, ...) | ✅ tested against eebus-go |
+| Limitation and monitoring of power consumption: LPC and LPP (Energy Guard), MPC (Monitoring Appliance) | ✅ tested against eebus-go |
+| Controllable System side: CS-LPC and CS-LPP (feed-in) with the LPC/LPP state machine (init, limited, failsafe, ...) | ✅ tested against eebus-go |
 | Monitored Unit side: MU-MPC (power, energy, currents, voltages, frequency) | ✅ tested against eebus-go |
-| Coordinated EV charging (CEVC), production use cases (LPP etc.) | later |
+| Coordinated EV charging (CEVC) | later |
 
 ## Try it
 
@@ -61,7 +61,7 @@ await opev.write_load_control_limits(ev, [PhaseLimit(p, 10) for p in "abc"])   #
 
 For devices that offer power limitation (LPC, e.g. wallboxes with §14a EnWG support) use `LPC` and `MPC`: `await lpc.write_consumption_limit(evse, LoadLimit(4200, duration=3600))`, `mpc.power(evse)`, `mpc.energy_consumed(evse)`.
 
-To act as the controllable system yourself (a device behind a §14a EnWG control box), use `CsLPC`. Incoming limits and failsafe values go through your approval callbacks; the built-in LPC state machine (LPC 1.0.0) handles init, heartbeat timeout (failsafe), failsafe duration and limit durations, so you only apply `effective_limit()` (W, `None` = no limit) whenever `CsLPC.STATE_CHANGED` comes. The failsafe limit is required: it applies from the start (init) until the Energy Guard states a limit:
+To act as the controllable system yourself (a device behind a §14a EnWG control box), use `CsLPC` (and `CsLPP` for a feed-in limit, the same API with `production_*` names and positive watts; pyeebus puts LPP's negative sign on the wire). Incoming limits and failsafe values go through your approval callbacks; the built-in state machine (LPC/LPP 1.0.0) handles init, heartbeat timeout (failsafe), failsafe duration and limit durations, so you only apply `effective_limit()` (W, `None` = no limit) whenever `STATE_CHANGED` comes. The failsafe limit is required: it applies from the start (init) until the Energy Guard states a limit:
 
 ```python
 mpc = MuMPC(service.entities[0], power=MonitorPowerConfig("abc"),
